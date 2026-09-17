@@ -21,6 +21,11 @@ import {
   type Evidence,
 } from "../data/tripOptions";
 import { saveTrip as apiSaveTrip } from "../services/tripAPI";
+import {
+  getRecommendations,
+  type RecommendationRequest,
+} from "../services/recommendationAPI";
+import { apiRecommendationToTripOption } from "../services/adapters";
 
 type Go = (route: string) => void;
 type Weights = { carbon: number; access: number; cost: number; time: number };
@@ -53,6 +58,24 @@ export default function Planner({ go }: { go: Go }) {
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [toast, setToast] = useState<string | null>(null);
 
+  // Dynamic Trip Requirement state
+  const [tripReq, setTripReq] = useState({
+    origin: TRIP.origin,
+    destination: TRIP.destination,
+    duration: TRIP.duration,
+    travelers: TRIP.travelers,
+    dates: TRIP.dates,
+    budget: TRIP.budget,
+    eco_priority: "High",
+    accessibility_required: true,
+  });
+
+  // Recommendation Engine state
+  const [plannerOptions, setPlannerOptions] = useState<TripOption[]>(OPTIONS);
+  const [isLiveRecs, setIsLiveRecs] = useState<boolean>(false);
+  const [loadingRecs, setLoadingRecs] = useState<boolean>(false);
+  const [recError, setRecError] = useState<string | null>(null);
+
   // Overlays
   const [showCompare, setShowCompare] = useState(false);
   const [mathFor, setMathFor] = useState<TripOption | null>(null);
@@ -60,25 +83,101 @@ export default function Planner({ go }: { go: Go }) {
   const [breakdown, setBreakdown] = useState<"cost" | "time" | null>(null);
   const [generating, setGenerating] = useState(false);
 
-  const recalcTimer = useRef<number | null>(null);
+  // Function to call Django POST /api/recommendations/
+  async function fetchRecommendations(currentWeights: Weights, reqData = tripReq) {
+    setLoadingRecs(true);
+    setRecError(null);
+    try {
+      const total = currentWeights.carbon + currentWeights.access + currentWeights.cost + currentWeights.time || 1;
+      const normalizedWeights = {
+        carbon: parseFloat((currentWeights.carbon / total).toFixed(4)),
+        accessibility: parseFloat((currentWeights.access / total).toFixed(4)),
+        cost: parseFloat((currentWeights.cost / total).toFixed(4)),
+        time: parseFloat((currentWeights.time / total).toFixed(4)),
+      };
 
-  // Options ranked by the current weighting.
-  const ranked = useMemo(() => {
-    return [...OPTIONS]
-      .map((o) => ({ o, s: weightedScore(o, weights) }))
-      .sort((x, y) => y.s - x.s);
+      const budgetNumber = typeof reqData.budget === "string"
+        ? parseInt(reqData.budget.replace(/[^0-9]/g, ""), 10) || 10000
+        : typeof reqData.budget === "number" ? reqData.budget : 10000;
+
+      const payload: RecommendationRequest = {
+        origin: reqData.origin || "Pune",
+        destination: reqData.destination || "Goa",
+        budget: budgetNumber,
+        currency: "INR",
+        travel_dates: reqData.dates || "14-17 Nov",
+        eco_priority: reqData.eco_priority || "High",
+        accessibility_required: reqData.accessibility_required !== undefined ? reqData.accessibility_required : true,
+        weights: normalizedWeights,
+      };
+
+      const response = await getRecommendations(payload);
+      if (response?.recommendations?.results && Array.isArray(response.recommendations.results) && response.recommendations.results.length > 0) {
+        const converted = response.recommendations.results.map((r, i) =>
+          apiRecommendationToTripOption(
+            r,
+            i,
+            response.recommendations.results.length,
+            reqData.origin,
+            reqData.destination
+          )
+        );
+        setPlannerOptions(converted);
+        setIsLiveRecs(true);
+        setRecError(null);
+      } else {
+        throw new Error("No recommendation results received from backend.");
+      }
+    } catch (err: any) {
+      console.warn("Backend recommendation fetch failed:", err);
+      const errMsg = err?.response?.data?.error || err?.message || "Could not reach recommendation engine.";
+      setRecError(errMsg);
+      setIsLiveRecs(false);
+    } finally {
+      setLoadingRecs(false);
+    }
+  }
+
+  // Initial fetch and debounced weight changes
+  const isFirstMount = useRef(true);
+  useEffect(() => {
+    if (isFirstMount.current) {
+      isFirstMount.current = false;
+      fetchRecommendations(DEFAULT_WEIGHTS, tripReq);
+      return;
+    }
+    setRecalc("updating");
+    const debounceTimer = window.setTimeout(() => {
+      fetchRecommendations(weights, tripReq).then(() => {
+        setRecalc("updated");
+      });
+    }, reduced ? 300 : 700);
+    return () => window.clearTimeout(debounceTimer);
   }, [weights]);
 
-  const recommended = ranked[0].o;
-  const recScore = ranked[0].s;
-  const standard = OPTIONS.find((o) => o.tag === "standard")!; // Flight + Taxi
-  const ecoTwin = OPTIONS.find((o) => o.tag === "eco-twin")!; // Train + EV
-  const selected = OPTIONS.find((o) => o.id === selectedId) ?? null;
+  // Options ranked: if live, backend authoritative scoring & rank is preserved; if fallback, weighted client scoring is used
+  const ranked = useMemo(() => {
+    if (isLiveRecs) {
+      return plannerOptions.map((o) => ({ o, s: o.score }));
+    }
+    return [...plannerOptions]
+      .map((o) => ({ o, s: weightedScore(o, weights) }))
+      .sort((x, y) => y.s - x.s);
+  }, [plannerOptions, isLiveRecs, weights]);
 
-  // Highlight superlatives (icon + text, never color alone).
+  const recommended = ranked[0]?.o || plannerOptions[0];
+  const recScore = ranked[0]?.s || recommended?.score || 90;
+  const standard = plannerOptions.find((o) => o.tag === "standard") || plannerOptions[plannerOptions.length - 1] || recommended;
+  const ecoTwin = plannerOptions.find((o) => o.tag === "eco-twin") || plannerOptions[0] || recommended;
+  const selected = plannerOptions.find((o) => o.id === selectedId) ?? null;
+
+  // Highlight superlatives
   const superlatives = useMemo(() => {
+    if (plannerOptions.length === 0) {
+      return { best: "", carbon: "", value: "", access: "", fast: "" };
+    }
     const by = <K extends keyof TripOption>(k: K, dir: "min" | "max") =>
-      [...OPTIONS].sort((a, b) => (dir === "min" ? (a[k] as number) - (b[k] as number) : (b[k] as number) - (a[k] as number)))[0].id;
+      [...plannerOptions].sort((a, b) => (dir === "min" ? (a[k] as number) - (b[k] as number) : (b[k] as number) - (a[k] as number)))[0].id;
     return {
       best: recommended.id,
       carbon: by("carbonKg", "min"),
@@ -86,33 +185,30 @@ export default function Planner({ go }: { go: Go }) {
       access: by("access", "max"),
       fast: by("timeMin", "min"),
     };
-  }, [recommended.id]);
+  }, [plannerOptions, recommended.id]);
 
   function changeWeight(key: keyof Weights, value: number) {
     setWeights((w) => ({ ...w, [key]: value }));
-    setRecalc("updating");
-    if (recalcTimer.current) window.clearTimeout(recalcTimer.current);
-    recalcTimer.current = window.setTimeout(() => setRecalc("updated"), reduced ? 250 : 850);
   }
-  useEffect(() => () => { if (recalcTimer.current) window.clearTimeout(recalcTimer.current); }, []);
 
   async function saveTrip() {
     setSaveState("saving");
     const optionToSave = selected || recommended;
+    const isVerifiedAcc = optionToSave.accessItems?.some((a) => a.status === "verified") ?? false;
     const payload = {
-      title: `${TRIP.origin} to ${TRIP.destination}`,
-      origin: TRIP.origin,
-      destination: TRIP.destination,
+      title: `${tripReq.origin} to ${tripReq.destination}`,
+      origin: tripReq.origin,
+      destination: tripReq.destination,
       duration_days: 3,
-      travel_dates: TRIP.dates,
+      travel_dates: tripReq.dates,
       transport_mode: optionToSave.label || optionToSave.transport,
       total_cost: optionToSave.cost,
       currency: "INR",
       eco_score: recScore || 90,
       carbon_emissions: optionToSave.carbonKg,
       carbon_saved: `${carbonCut}% vs standard`,
-      accessibility_rating: 5,
-      accessibility_verified: true,
+      accessibility_rating: optionToSave.access,
+      accessibility_verified: isVerifiedAcc,
       status: "planned",
       cover_image: "https://images.unsplash.com/photo-1512343879784-a960bf40e7f2?w=800&q=80",
       stays: "Verified Coastal Eco Stay",
@@ -122,16 +218,25 @@ export default function Planner({ go }: { go: Go }) {
       const res = await apiSaveTrip(payload);
       setSaveState("saved");
       setToast(res?.message || "Trip saved to your collection.");
-      window.setTimeout(() => setToast(null), 3000);
+      window.setTimeout(() => {
+        setToast(null);
+        setSaveState("idle");
+      }, 3000);
     } catch (err: any) {
       console.warn("Could not save trip to backend:", err);
-      setSaveState("saved");
-      setToast("Trip saved to your collection.");
-      window.setTimeout(() => setToast(null), 3000);
+      setSaveState("error");
+      const errDetail = err?.response?.data?.error || err?.response?.data?.detail || "Could not save trip to backend.";
+      setToast(errDetail);
+      window.setTimeout(() => {
+        setToast(null);
+        setSaveState("idle");
+      }, 4000);
     }
   }
 
-  const carbonCut = Math.round(((standard.carbonKg - ecoTwin.carbonKg) / standard.carbonKg) * 100);
+  const carbonCut = standard && ecoTwin && standard.carbonKg > 0
+    ? Math.max(0, Math.round(((standard.carbonKg - ecoTwin.carbonKg) / standard.carbonKg) * 100))
+    : 0;
 
   return (
     <AppShell active="planner" go={go}>
@@ -145,14 +250,18 @@ export default function Planner({ go }: { go: Go }) {
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-2xl font-bold tracking-tight text-near-black">
-                  {TRIP.origin} <span className="text-emerald-500">→</span> {TRIP.destination}
+                  {tripReq.origin} <span className="text-emerald-500">→</span> {tripReq.destination}
                 </h1>
-                <Badge icon="AI" label="Planning" tone={TONE.ai} />
+                <Badge
+                  icon="AI"
+                  label={isLiveRecs ? "Live Engine" : "Planning"}
+                  tone={isLiveRecs ? TONE.verified : TONE.ai}
+                />
               </div>
               <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-slate-gray">
-                <span className="flex items-center gap-1"><Icon.Calendar size={14} /> {TRIP.duration}</span>
-                <span className="flex items-center gap-1"><Icon.Profile size={14} /> {TRIP.travelers} Travelers</span>
-                <span className="flex items-center gap-1"><Icon.Clock size={14} /> Dates {TRIP.dates}</span>
+                <span className="flex items-center gap-1"><Icon.Calendar size={14} /> {tripReq.duration}</span>
+                <span className="flex items-center gap-1"><Icon.Profile size={14} /> {tripReq.travelers} Travelers</span>
+                <span className="flex items-center gap-1"><Icon.Clock size={14} /> Dates {tripReq.dates}</span>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -173,10 +282,25 @@ export default function Planner({ go }: { go: Go }) {
         </div>
       </div>
 
-      {/* ---- Planning progress ---- */}
+      {/* ---- Planning progress & loading banner ---- */}
       <div className="border-b border-border bg-warm-white">
-        <div className="mx-auto max-w-6xl px-6 py-3">
+        <div className="mx-auto max-w-6xl px-6 py-3 space-y-2">
           <PlanningProgress />
+          {loadingRecs && (
+            <div className="flex items-center gap-2 py-1 text-xs text-forest-700 font-medium">
+              <AiThinking label="Fetching real-time scored recommendations from Django backend…" />
+            </div>
+          )}
+          {recError && (
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-xs text-amber-900">
+              <div className="flex items-center gap-2">
+                <Icon.Warning size={15} className="text-amber-600 shrink-0" />
+                <span>{recError}</span>
+                <span className="text-amber-700">(Using demonstration fallback options)</span>
+              </div>
+              <Button size="sm" variant="secondary" onClick={() => fetchRecommendations(weights, tripReq)}>Retry</Button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -184,7 +308,17 @@ export default function Planner({ go }: { go: Go }) {
       <main className="mx-auto grid max-w-6xl gap-6 px-6 py-8 lg:grid-cols-[320px_1fr]">
         {/* LEFT RAIL — order after main on mobile so recommendation leads */}
         <aside className="order-2 space-y-5 lg:order-1">
-          <RequirementSummary editing={editReq} onToggle={() => setEditReq((v) => !v)} go={go} />
+          <RequirementSummary
+            tripReq={tripReq}
+            editing={editReq}
+            onToggle={() => setEditReq((v) => !v)}
+            onApply={(newReq) => {
+              setTripReq(newReq);
+              setEditReq(false);
+              fetchRecommendations(weights, newReq);
+            }}
+            go={go}
+          />
           <ScoreWeights weights={weights} onChange={changeWeight} recalc={recalc} />
           <AccessibilityEvidence option={recommended} onView={() => setShowEvidence(true)} />
           <WeatherContext />
@@ -209,9 +343,12 @@ export default function Planner({ go }: { go: Go }) {
 
           {/* All travel options */}
           <section>
-            <SectionTitle title="All travel options" note="Illustrative demonstration values — not live data." />
+            <SectionTitle
+              title="All travel options"
+              note={isLiveRecs ? "Live ranked options from EcoTrail backend recommendation engine." : "Illustrative demonstration values — backend offline."}
+            />
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {OPTIONS.map((o) => (
+              {plannerOptions.map((o) => (
                 <OptionCard
                   key={o.id}
                   option={o}
@@ -235,7 +372,13 @@ export default function Planner({ go }: { go: Go }) {
             </div>
           </div>
 
-          <RouteMap standard={standard} ecoTwin={ecoTwin} recommendedId={recommended.id} />
+          <RouteMap
+            standard={standard}
+            ecoTwin={ecoTwin}
+            recommendedId={recommended.id}
+            origin={tripReq.origin}
+            destination={tripReq.destination}
+          />
         </div>
       </main>
 
@@ -268,6 +411,7 @@ export default function Planner({ go }: { go: Go }) {
       {/* ---- Overlays ---- */}
       {showCompare && (
         <ComparisonSheet
+          options={plannerOptions}
           superlatives={superlatives}
           weights={weights}
           onClose={() => setShowCompare(false)}
@@ -278,7 +422,15 @@ export default function Planner({ go }: { go: Go }) {
       {mathFor && <ShowYourMathSheet option={mathFor} onClose={() => setMathFor(null)} />}
       {showEvidence && <EvidenceSheet option={recommended} onClose={() => setShowEvidence(false)} />}
       {breakdown && <BreakdownSheet option={recommended} kind={breakdown} onClose={() => setBreakdown(null)} />}
-      {generating && <ItineraryGeneration reduced={reduced} onDone={() => setGenerating(false)} onBuild={() => { setGenerating(false); go("itinerary"); }} option={selected ?? recommended} />}
+      {generating && (
+        <ItineraryGeneration
+          reduced={reduced}
+          onDone={() => setGenerating(false)}
+          onBuild={() => { setGenerating(false); go("itinerary"); }}
+          option={selected ?? recommended}
+          destination={tripReq.destination}
+        />
+      )}
     </AppShell>
   );
 }
@@ -374,34 +526,66 @@ function PlanningProgress() {
 }
 
 /* ---- Requirement summary (left rail) ---- */
-function RequirementSummary({ editing, onToggle, go }: { editing: boolean; onToggle: () => void; go: Go }) {
-  const rows: [string, string][] = [
-    ["Origin", TRIP.origin],
-    ["Destination", TRIP.destination],
-    ["Duration", TRIP.duration],
-    ["Travelers", String(TRIP.travelers)],
-    ["Dates", TRIP.dates],
-    ["Budget", TRIP.budget],
+function RequirementSummary({
+  tripReq,
+  editing,
+  onToggle,
+  onApply,
+  go,
+}: {
+  tripReq: {
+    origin: string;
+    destination: string;
+    duration: string;
+    travelers: number;
+    dates: string;
+    budget: string;
+    eco_priority: string;
+    accessibility_required: boolean;
+  };
+  editing: boolean;
+  onToggle: () => void;
+  onApply: (newReq: any) => void;
+  go: Go;
+}) {
+  const [formValues, setFormValues] = useState(tripReq);
+
+  useEffect(() => {
+    setFormValues(tripReq);
+  }, [tripReq, editing]);
+
+  const rows: [string, string, keyof typeof tripReq][] = [
+    ["Origin", tripReq.origin, "origin"],
+    ["Destination", tripReq.destination, "destination"],
+    ["Duration", tripReq.duration, "duration"],
+    ["Travelers", String(tripReq.travelers), "travelers"],
+    ["Dates", tripReq.dates, "dates"],
+    ["Budget", tripReq.budget, "budget"],
   ];
   const prefs: [string, string][] = [
-    ["Sustainability", "High priority"],
-    ["Accessibility", "Step-free preferred"],
+    ["Sustainability", `${tripReq.eco_priority} priority`],
+    ["Accessibility", tripReq.accessibility_required ? "Step-free required" : "Standard"],
     ["Convenience", "Balanced"],
   ];
   return (
     <div className="rounded-xl border border-border bg-card p-4 elev-card">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-near-black">Trip requirements</h3>
-        <button onClick={onToggle} className="text-xs font-medium text-emerald-500 hover:underline">{editing ? "Done" : "Edit"}</button>
+        <button onClick={onToggle} className="text-xs font-medium text-emerald-500 hover:underline">{editing ? "Cancel" : "Edit"}</button>
       </div>
       <p className="mt-1 text-[11px] text-medium-gray">These values shape your recommendations.</p>
 
       <dl className="mt-3 space-y-2">
-        {rows.map(([k, v]) => (
+        {rows.map(([k, v, key]) => (
           <div key={k} className="flex items-center justify-between gap-2">
             <dt className="text-xs text-medium-gray">{k}</dt>
             {editing ? (
-              <input defaultValue={v} aria-label={k} className="h-7 w-32 rounded-md border border-mist bg-warm-white px-2 text-right text-xs text-near-black focus:border-emerald-500 focus:outline-none" />
+              <input
+                value={formValues[key] as string}
+                onChange={(e) => setFormValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                aria-label={k}
+                className="h-7 w-32 rounded-md border border-mist bg-warm-white px-2 text-right text-xs text-near-black focus:border-emerald-500 focus:outline-none"
+              />
             ) : (
               <dd className="text-xs font-medium text-charcoal">{v}</dd>
             )}
@@ -424,7 +608,7 @@ function RequirementSummary({ editing, onToggle, go }: { editing: boolean; onTog
       {editing && (
         <div className="mt-3 flex gap-2">
           <Button size="sm" variant="tertiary" className="flex-1" onClick={() => go("home")}>Edit request</Button>
-          <Button size="sm" className="flex-1" onClick={onToggle}>Apply</Button>
+          <Button size="sm" className="flex-1" onClick={() => onApply(formValues)}>Apply</Button>
         </div>
       )}
     </div>
@@ -867,7 +1051,19 @@ function BreakdownTeaser({ option, kind, onOpen }: { option: TripOption; kind: "
 }
 
 /* ---- Route map ---- */
-function RouteMap({ standard, ecoTwin, recommendedId }: { standard: TripOption; ecoTwin: TripOption; recommendedId: string }) {
+function RouteMap({
+  standard,
+  ecoTwin,
+  recommendedId,
+  origin = "Pune",
+  destination = "Goa",
+}: {
+  standard: TripOption;
+  ecoTwin: TripOption;
+  recommendedId: string;
+  origin?: string;
+  destination?: string;
+}) {
   const [route, setRoute] = useState<"standard" | "eco">(recommendedId === standard.id ? "standard" : "eco");
   const active = route === "eco" ? ecoTwin : standard;
   return (
@@ -902,8 +1098,8 @@ function RouteMap({ standard, ecoTwin, recommendedId }: { standard: TripOption; 
           />
         </svg>
         {/* origin / destination markers */}
-        <Marker x={60} y={210} label={TRIP.origin} kind="origin" />
-        <Marker x={470} y={90} label="Goa" kind="dest" />
+        <Marker x={60} y={210} label={origin} kind="origin" />
+        <Marker x={470} y={90} label={destination} kind="dest" />
 
         <div className="absolute left-3 top-3 rounded-lg border border-border bg-card/95 px-3 py-2 text-[11px] backdrop-blur">
           <div className="flex items-center gap-1.5 text-charcoal">
@@ -951,14 +1147,23 @@ function Marker({ x, y, label, kind }: { x: number; y: number; label: string; ki
    Overlays / sheets
    ============================================================ */
 function ComparisonSheet({
-  superlatives, weights, onClose, onSelect, selectedId,
+  options,
+  superlatives,
+  weights,
+  onClose,
+  onSelect,
+  selectedId,
 }: {
+  options: TripOption[];
   superlatives: { best: string; carbon: string; value: string; access: string; fast: string };
-  weights: Weights; onClose: () => void; onSelect: (id: string) => void; selectedId: string | null;
+  weights: Weights;
+  onClose: () => void;
+  onSelect: (id: string) => void;
+  selectedId: string | null;
 }) {
   return (
     <Sheet title="Compare options" size="lg" onClose={onClose}>
-      <p className="-mt-1 mb-4 flex items-center gap-1.5 text-xs text-medium-gray"><Icon.Info size={13} /> Demonstration values. Highlights combine icon, text and emphasis — never color alone.</p>
+      <p className="-mt-1 mb-4 flex items-center gap-1.5 text-xs text-medium-gray"><Icon.Info size={13} /> Authoritative recommendation comparison. Highlights combine icon, text and emphasis — never color alone.</p>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[640px] border-collapse text-sm">
           <thead>
@@ -974,7 +1179,7 @@ function ComparisonSheet({
             </tr>
           </thead>
           <tbody>
-            {OPTIONS.map((o) => {
+            {options.map((o) => {
               const labels = labelsFor(o.id, superlatives);
               return (
                 <tr key={o.id} className={`border-b border-border ${o.id === superlatives.best ? "bg-sage-100/50" : ""}`}>
@@ -992,7 +1197,7 @@ function ComparisonSheet({
                   <td className="py-3 pr-3 font-mono">{inr(o.cost)}</td>
                   <td className="py-3 pr-3 font-mono">{o.time}</td>
                   <td className="py-3 pr-3"><AccessDots n={o.access} /></td>
-                  <td className="py-3 pr-3 font-mono font-semibold text-forest-700">{weightedScore(o, weights)}</td>
+                  <td className="py-3 pr-3 font-mono font-semibold text-forest-700">{o.score ?? weightedScore(o, weights)}</td>
                   <td className="py-3">
                     <Button size="sm" variant={selectedId === o.id ? "secondary" : "primary"} onClick={() => onSelect(o.id)}>
                       {selectedId === o.id ? "Selected" : "Select"}
@@ -1010,9 +1215,47 @@ function ComparisonSheet({
 
 function ShowYourMathSheet({ option, onClose }: { option: TripOption; onClose: () => void }) {
   const total = option.segments.reduce((n, s) => n + s.co2, 0);
+  const math = option.rawShowYourMath;
   return (
     <Sheet title="Show Your Math" onClose={onClose}>
-      <p className="-mt-1 mb-4 text-sm text-slate-gray">Estimated emissions for <span className="font-medium text-charcoal">{option.transport}</span>, calculated per segment.</p>
+      <p className="-mt-1 mb-4 text-sm text-slate-gray">
+        Authoritative mathematical calculation for <span className="font-medium text-charcoal">{option.transport}</span>.
+      </p>
+
+      {math?.calculation && (
+        <div className="mb-4 rounded-xl border border-border bg-warm-white p-4">
+          <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-forest-700">
+            <span>Authoritative Scoring Formula</span>
+            <span className="font-mono text-sm font-bold">{option.score}/100</span>
+          </div>
+          {math.calculation.formula && (
+            <div className="mt-2 rounded-lg bg-card p-3 font-mono text-xs text-charcoal border border-border">
+              {math.calculation.formula}
+            </div>
+          )}
+          {math.contributions && (
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+              <div className="rounded-lg bg-card p-2 text-center border border-border">
+                <div className="text-[11px] text-medium-gray">Carbon Contrib.</div>
+                <div className="font-mono font-semibold text-carbon">+{math.contributions.carbon}</div>
+              </div>
+              <div className="rounded-lg bg-card p-2 text-center border border-border">
+                <div className="text-[11px] text-medium-gray">Access Contrib.</div>
+                <div className="font-mono font-semibold text-access">+{math.contributions.accessibility}</div>
+              </div>
+              <div className="rounded-lg bg-card p-2 text-center border border-border">
+                <div className="text-[11px] text-medium-gray">Cost Contrib.</div>
+                <div className="font-mono font-semibold text-forest-700">+{math.contributions.cost}</div>
+              </div>
+              <div className="rounded-lg bg-card p-2 text-center border border-border">
+                <div className="text-[11px] text-medium-gray">Time Contrib.</div>
+                <div className="font-mono font-semibold text-charcoal">+{math.contributions.time}</div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="space-y-3">
         {option.segments.map((s, i) => {
           const I = Icon[s.icon];
@@ -1107,7 +1350,19 @@ function BreakdownSheet({ option, kind, onClose }: { option: TripOption; kind: "
 }
 
 /* ---- Itinerary generation transition ---- */
-function ItineraryGeneration({ option, reduced, onDone, onBuild }: { option: TripOption; reduced: boolean; onDone: () => void; onBuild: () => void }) {
+function ItineraryGeneration({
+  option,
+  reduced,
+  onDone,
+  onBuild,
+  destination = "Goa",
+}: {
+  option: TripOption;
+  reduced: boolean;
+  onDone: () => void;
+  onBuild: () => void;
+  destination?: string;
+}) {
   const steps = ["Planning travel timing", "Finding suitable activities", "Considering accessibility", "Optimizing route", "Preparing your itinerary"];
   const [step, setStep] = useState(0);
   const [done, setDone] = useState(false);
@@ -1134,7 +1389,7 @@ function ItineraryGeneration({ option, reduced, onDone, onBuild }: { option: Tri
                 </li>
               ))}
             </ul>
-            <p className="mt-4 text-xs text-medium-gray">Preparing your {option.transport} plan to {TRIP.destination}.</p>
+            <p className="mt-4 text-xs text-medium-gray">Preparing your {option.transport} plan to {destination}.</p>
           </>
         ) : (
           <div className="text-center">

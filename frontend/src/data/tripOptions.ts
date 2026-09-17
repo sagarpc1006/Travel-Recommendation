@@ -59,6 +59,8 @@ export type TripOption = {
   accessItems: { label: string; status: Evidence }[];
   reasons: string[];
   tag?: "standard" | "eco-twin";
+  rawShowYourMath?: any;
+  explanation?: any;
 };
 
 export const TRIP = {

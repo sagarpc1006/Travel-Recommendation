@@ -4,6 +4,9 @@
 import type { Destination, AccessItem } from '../data/destinations';
 import type { Trip, TripStatus, ItineraryDay } from '../data/trips';
 import type { ApiPlace } from './discoverAPI';
+import type { TripOption, Segment, Evidence } from '../data/tripOptions';
+import type { IconName } from '../components/icons';
+import type { RecommendationResult } from './recommendationAPI';
 
 const KNOWN_COORDS: Record<string, { x: number; y: number }> = {
   munnar: { x: 34, y: 78 },
@@ -208,4 +211,175 @@ export function figmaCategoryToBackendCategory(figmaType: string): string | unde
     default:
       return undefined;
   }
+}
+
+/**
+ * Converts a backend RecommendationResult into a Figma TripOption
+ */
+export function apiRecommendationToTripOption(
+  rec: RecommendationResult,
+  index: number,
+  totalCount: number,
+  origin = 'Pune',
+  destination = 'Goa'
+): TripOption {
+  const durMin = rec.duration_minutes || 180;
+  const hours = Math.floor(durMin / 60);
+  const mins = durMin % 60;
+  const formattedTime = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+
+  const modeStr = (
+    typeof rec.transport === 'object' && rec.transport !== null
+      ? rec.transport.mode || rec.transport.label || ''
+      : String(rec.transport || rec.title || '')
+  ).toLowerCase();
+
+  let icons: IconName[] = ['Route', 'Leaf'];
+  let tag: 'standard' | 'eco-twin' | undefined = undefined;
+
+  if (modeStr.includes('flight') || modeStr.includes('air') || modeStr.includes('plane')) {
+    icons = ['Flight', 'Car'];
+    tag = 'standard';
+  } else if (modeStr.includes('rail') || modeStr.includes('train')) {
+    icons = ['Train', 'EV'];
+    if (index === 0) tag = 'eco-twin';
+  } else if (modeStr.includes('ev') || modeStr.includes('electric')) {
+    icons = ['EV', 'Car'];
+    if (index === 0) tag = 'eco-twin';
+  } else if (modeStr.includes('bus') || modeStr.includes('coach')) {
+    icons = ['Bus', 'Walk'];
+  } else if (index === 0) {
+    tag = 'eco-twin';
+  }
+
+  if (!tag && index === totalCount - 1 && totalCount > 1) {
+    tag = 'standard';
+  }
+
+  const carbonVal = typeof rec.carbon?.kg_co2e === 'number'
+    ? Math.round(rec.carbon.kg_co2e)
+    : 30;
+
+  const costVal = typeof rec.price?.amount === 'number'
+    ? Math.round(rec.price.amount)
+    : 7500;
+
+  const accessRating = typeof rec.accessibility?.rating === 'number'
+    ? Math.max(1, Math.min(5, Math.round(rec.accessibility.rating)))
+    : typeof rec.scores?.accessibility === 'number'
+      ? Math.max(1, Math.min(5, Math.round(rec.scores.accessibility / 20)))
+      : 4;
+
+  const isVerified = Boolean(rec.accessibility?.verified);
+  const accessStatus: Evidence = isVerified
+    ? 'verified'
+    : rec.accessibility?.status === 'supported'
+      ? 'supported'
+      : 'unknown';
+
+  const segments: Segment[] = modeStr.includes('flight')
+    ? [
+        { mode: 'Flight', icon: 'Flight', distanceKm: Math.round((rec.distance_km || 430) * 0.9), factor: 0.246, co2: Math.round(carbonVal * 0.9) },
+        { mode: 'Taxi', icon: 'Car', distanceKm: 30, factor: 0.171, co2: Math.max(1, Math.round(carbonVal * 0.1)) },
+      ]
+    : modeStr.includes('rail') || modeStr.includes('train')
+      ? [
+          { mode: 'Electric Train', icon: 'Train', distanceKm: Math.round((rec.distance_km || 450) * 0.85), factor: 0.035, co2: Math.round(carbonVal * 0.8) },
+          { mode: 'Shared EV Shuttle', icon: 'EV', distanceKm: 25, factor: 0.045, co2: Math.max(1, Math.round(carbonVal * 0.2)) },
+        ]
+      : [
+          { mode: 'Electric Vehicle', icon: 'EV', distanceKm: Math.round(rec.distance_km || 450), factor: 0.045, co2: carbonVal },
+        ];
+
+  const carbonScore = rec.scores?.carbon ?? 90;
+  const accessScore = rec.scores?.accessibility ?? 90;
+  const costScore = rec.scores?.cost ?? 80;
+  const timeScore = rec.scores?.time ?? 75;
+
+  const sub = {
+    carbon: carbonScore,
+    access: accessScore,
+    cost: costScore,
+    time: timeScore,
+  };
+
+  const carbonWeight = Math.round((rec.weights?.carbon ?? 0.4) * 100);
+  const accessWeight = Math.round((rec.weights?.accessibility ?? 0.3) * 100);
+  const costWeight = Math.round((rec.weights?.cost ?? 0.15) * 100);
+  const timeWeight = Math.round((rec.weights?.time ?? 0.15) * 100);
+
+  const subDetail = [
+    {
+      key: 'carbon',
+      label: 'Carbon',
+      value: carbonScore,
+      weightPct: carbonWeight,
+      explain: rec.explanation?.why_recommended?.[0] || 'Lower emissions than conventional baseline.',
+    },
+    {
+      key: 'access',
+      label: 'Accessibility',
+      value: accessScore,
+      weightPct: accessWeight,
+      explain: isVerified ? 'Verified step-free and accessible boarding.' : 'Accessible transit infrastructure.',
+    },
+    {
+      key: 'cost',
+      label: 'Cost',
+      value: costScore,
+      weightPct: costWeight,
+      explain: rec.within_budget ? 'Within target budget.' : 'Transport and mobility evaluated.',
+    },
+    {
+      key: 'time',
+      label: 'Time',
+      value: timeScore,
+      weightPct: timeWeight,
+      explain: `Door-to-door duration: ${formattedTime}.`,
+    },
+  ];
+
+  const costBreakdown = [
+    { label: 'Transport', value: Math.round(costVal * 0.65) },
+    { label: 'Accommodation', value: Math.round(costVal * 0.25) },
+    { label: 'Local mobility', value: Math.round(costVal * 0.1) },
+  ];
+
+  const timeBreakdown = [
+    { label: 'Transit', value: `${Math.max(1, hours - 1)}h ${mins}m` },
+    { label: 'Transfers', value: '30m' },
+    { label: 'Walking / Boarding', value: '15m' },
+  ];
+
+  const reasons = Array.isArray(rec.explanation?.why_recommended) && rec.explanation.why_recommended.length > 0
+    ? rec.explanation.why_recommended
+    : ['Verified low-carbon route', 'Matches traveler priorities'];
+
+  return {
+    id: String(rec.id || `opt_${index}`),
+    label: `Option ${String.fromCharCode(65 + index)}`,
+    transport: rec.title || 'Sustainable Journey',
+    icons,
+    route: `${origin} → ${destination} (${rec.title || 'Transit'})`,
+    time: formattedTime,
+    timeMin: durMin,
+    cost: costVal,
+    carbonKg: carbonVal,
+    access: accessRating,
+    score: rec.green_accessible_score || Math.round(carbonScore * 0.4 + accessScore * 0.3 + costScore * 0.15 + timeScore * 0.15),
+    sub,
+    subDetail,
+    costBreakdown,
+    timeBreakdown,
+    segments,
+    accessItems: [
+      { label: 'Step-free route', status: accessStatus },
+      { label: 'Accessible transport', status: accessStatus },
+      { label: 'Accessible stay', status: 'supported' as Evidence },
+    ],
+    reasons,
+    tag,
+    rawShowYourMath: rec.show_your_math,
+    explanation: rec.explanation,
+  };
 }
