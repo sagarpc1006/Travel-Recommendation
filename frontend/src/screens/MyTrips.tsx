@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import AppShell from "../components/AppShell";
 import { Icon } from "../components/icons";
 import { Button, Badge, TONE } from "../components/ui";
 import { EmptyState } from "../components/states";
 import { TRIPS, STATUS_META, ACCESS_READY_META, type Trip, type TripStatus } from "../data/trips";
+import { getRecentTrips, deleteTrip as apiDeleteTrip } from "../services/tripAPI";
+import { apiTripToTrip } from "../services/adapters";
 
 type Go = (route: string) => void;
 
@@ -17,8 +19,53 @@ const TABS: { key: string; label: string; match: (t: Trip) => boolean }[] = [
 
 export default function MyTrips({ go, onOpenTrip }: { go: Go; onOpenTrip: (id: string, route: string) => void }) {
   const [tab, setTab] = useState("all");
+  const [allTrips, setAllTrips] = useState<Trip[]>(TRIPS);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchTrips = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getRecentTrips();
+      if (Array.isArray(data) && data.length > 0) {
+        const mapped = data.map((item: any) => {
+          // If already matches Trip shape, use it, else adapt
+          return item.days ? (item as Trip) : apiTripToTrip(item);
+        });
+        // Merge real backend trips with demo trips
+        const seenIds = new Set(mapped.map((m) => String(m.id)));
+        const combined = [...mapped, ...TRIPS.filter((t) => !seenIds.has(String(t.id)))];
+        setAllTrips(combined);
+      } else {
+        setAllTrips(TRIPS);
+      }
+    } catch (err) {
+      console.warn("Could not load trips from backend:", err);
+      setError("Unable to sync trips with server. Showing cached journeys.");
+      setAllTrips(TRIPS);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchTrips();
+  }, []);
+
+  const handleDelete = async (tripId: string) => {
+    try {
+      await apiDeleteTrip(tripId);
+      setAllTrips((prev) => prev.filter((t) => String(t.id) !== String(tripId)));
+    } catch (err) {
+      console.warn("Failed to delete trip:", err);
+      // Remove locally regardless
+      setAllTrips((prev) => prev.filter((t) => String(t.id) !== String(tripId)));
+    }
+  };
+
   const active = TABS.find((t) => t.key === tab)!;
-  const trips = TRIPS.filter(active.match);
+  const trips = allTrips.filter(active.match);
 
   return (
     <AppShell active="mytrips" go={go}>
@@ -31,10 +78,17 @@ export default function MyTrips({ go, onOpenTrip }: { go: Go; onOpenTrip: (id: s
           <Button icon="Route" onClick={() => go("planner")}>Plan a Trip</Button>
         </div>
 
+        {error && (
+          <div className="mt-4 flex items-center justify-between rounded-xl border border-error/20 bg-error-soft/60 px-4 py-2.5 text-xs text-error">
+            <span>{error}</span>
+            <button onClick={fetchTrips} className="underline font-medium hover:text-near-black">Retry</button>
+          </div>
+        )}
+
         {/* Tabs */}
         <div className="mt-6 flex gap-1 overflow-x-auto border-b border-border">
           {TABS.map((t) => {
-            const count = TRIPS.filter(t.match).length;
+            const count = allTrips.filter(t.match).length;
             return (
               <button
                 key={t.key}
@@ -48,7 +102,17 @@ export default function MyTrips({ go, onOpenTrip }: { go: Go; onOpenTrip: (id: s
           })}
         </div>
 
-        {trips.length === 0 ? (
+        {loading && allTrips.length === 0 ? (
+          <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {[1, 2, 3].map((n) => (
+              <div key={n} className="overflow-hidden rounded-xl border border-border bg-card p-4 animate-pulse">
+                <div className="h-44 w-full rounded-lg bg-sage-200/60" />
+                <div className="mt-3 h-5 w-2/3 rounded bg-sage-200/70" />
+                <div className="mt-2 h-4 w-1/3 rounded bg-sage-100" />
+              </div>
+            ))}
+          </div>
+        ) : trips.length === 0 ? (
           <div className="mt-8">
             <EmptyState
               icon="Calendar"
@@ -61,7 +125,13 @@ export default function MyTrips({ go, onOpenTrip }: { go: Go; onOpenTrip: (id: s
         ) : (
           <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
             {trips.map((t) => (
-              <TripCard key={t.id} t={t} onOpen={() => onOpenTrip(t.id, "trip-detail")} onItinerary={() => onOpenTrip(t.id, "itinerary")} />
+              <TripCard
+                key={t.id}
+                t={t}
+                onOpen={() => onOpenTrip(t.id, "trip-detail")}
+                onItinerary={() => onOpenTrip(t.id, "itinerary")}
+                onDelete={() => handleDelete(t.id)}
+              />
             ))}
           </div>
         )}
@@ -70,7 +140,17 @@ export default function MyTrips({ go, onOpenTrip }: { go: Go; onOpenTrip: (id: s
   );
 }
 
-function TripCard({ t, onOpen, onItinerary }: { t: Trip; onOpen: () => void; onItinerary: () => void }) {
+function TripCard({
+  t,
+  onOpen,
+  onItinerary,
+  onDelete,
+}: {
+  t: Trip;
+  onOpen: () => void;
+  onItinerary: () => void;
+  onDelete?: () => void;
+}) {
   const st = STATUS_META[t.status];
   const ar = ACCESS_READY_META[t.accessReady];
   const cut = Math.round(((t.standardCarbonKg - t.carbonKg) / t.standardCarbonKg) * 100);
@@ -114,9 +194,22 @@ function TripCard({ t, onOpen, onItinerary }: { t: Trip; onOpen: () => void; onI
           <Badge icon={ar.icon} label={ar.label} tone={TONE[ar.tone]} />
         </div>
 
-        <div className="mt-auto flex gap-2 pt-4">
+        <div className="mt-auto flex items-center gap-2 pt-4">
           <Button size="sm" className="flex-1" icon="Calendar" onClick={onItinerary}>Itinerary</Button>
           <Button size="sm" variant="tertiary" onClick={onOpen}>Details</Button>
+          {onDelete && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete();
+              }}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-medium-gray transition-colors hover:bg-error-soft hover:text-error"
+              aria-label={`Delete trip to ${t.destination}`}
+              title="Delete trip"
+            >
+              <Icon.Close size={14} />
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import AppShell from "../components/AppShell";
 import AiCommandCenter from "../components/AiCommandCenter";
 import { DestinationCard } from "../components/DestinationCard";
@@ -5,6 +6,9 @@ import { Icon, type IconName } from "../components/icons";
 import { Button, Badge, TONE, ProgressBar } from "../components/ui";
 import { DESTINATIONS, type Destination } from "../data/destinations";
 import { useAuth } from "../context/AuthContext";
+import { discoverPlaces } from "../services/discoverAPI";
+import { getEcoImpact, getRecentTrips, getUserPreferences } from "../services/tripAPI";
+import { apiPlaceToDestination } from "../services/adapters";
 
 type Go = (route: string) => void;
 
@@ -37,8 +41,73 @@ function SectionTitle({
 export default function Home({ go, onExplore }: { go: Go; onExplore: (d: Destination) => void }) {
   const { user, profile } = useAuth();
   const firstName = (user?.displayName || profile?.name || (user?.email ? user.email.split('@')[0] : 'Traveler')).split(' ')[0];
-  const recommended = DESTINATIONS.filter((d) => d.recommended);
-  const explore = DESTINATIONS.filter((d) => !d.recommended).slice(0, 3);
+
+  const [destList, setDestList] = useState<Destination[]>(DESTINATIONS);
+  const [ecoImpact, setEcoImpact] = useState({
+    carbonAvoidedKg: 127,
+    sustainableChoices: 6,
+    tripsOptimized: 4,
+  });
+  const [latestTrip, setLatestTrip] = useState<any>(null);
+  const [ecoPriorityLabel, setEcoPriorityLabel] = useState("high sustainability, step-free preferred");
+
+  useEffect(() => {
+    let isMounted = true;
+
+    // 1. Fetch live destinations from backend
+    discoverPlaces()
+      .then((res) => {
+        if (isMounted && res?.success && Array.isArray(res.places) && res.places.length > 0) {
+          const mapped = res.places.map(apiPlaceToDestination);
+          setDestList(mapped);
+        }
+      })
+      .catch((err) => {
+        console.debug("Discover API fallback on Home:", err);
+      });
+
+    // 2. Fetch real eco impact
+    getEcoImpact()
+      .then((impact) => {
+        if (isMounted && impact) {
+          setEcoImpact({
+            carbonAvoidedKg: impact.carbonAvoidedKg || 127,
+            sustainableChoices: impact.sustainableChoices || 6,
+            tripsOptimized: impact.tripsOptimized || 4,
+          });
+        }
+      })
+      .catch(() => {});
+
+    // 3. Fetch latest trip for "Continue planning"
+    getRecentTrips()
+      .then((trips) => {
+        if (isMounted && Array.isArray(trips) && trips.length > 0) {
+          setLatestTrip(trips[0]);
+        }
+      })
+      .catch(() => {});
+
+    // 4. Fetch user preferences
+    getUserPreferences()
+      .then((p) => {
+        if (isMounted && p) {
+          const prio = p.ecoPriority ? `${p.ecoPriority.toLowerCase()} sustainability` : 'high sustainability';
+          const acc = p.accessibility ? 'step-free preferred' : 'convenient transit';
+          setEcoPriorityLabel(`${prio}, ${acc}`);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const recommended = destList.filter((d) => d.recommended);
+  const explore = destList.filter((d) => !d.recommended).slice(0, 3);
+  const displayRecommended = recommended.length > 0 ? recommended.slice(0, 4) : destList.slice(0, 4);
+  const displayExplore = explore.length > 0 ? explore : destList.slice(4, 7);
 
   return (
     <AppShell active="home" go={go}>
@@ -66,15 +135,21 @@ export default function Home({ go, onExplore }: { go: Go; onExplore: (d: Destina
             <SectionTitle title="Continue planning" />
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
               <div className="relative h-24 w-full overflow-hidden rounded-lg bg-sage-200 sm:w-36 sm:shrink-0">
-                <img src={DESTINATIONS[1].image} alt="Goa" className="h-full w-full object-cover" />
+                <img
+                  src={latestTrip?.coverImage || destList[1]?.image || DESTINATIONS[1].image}
+                  alt={latestTrip?.destination || "Goa"}
+                  className="h-full w-full object-cover"
+                />
               </div>
               <div className="flex-1">
                 <div className="flex items-center gap-2">
-                  <h3 className="font-semibold text-near-black">Pune → Goa</h3>
+                  <h3 className="font-semibold text-near-black">
+                    {latestTrip?.title || `${latestTrip?.origin || 'Pune'} → ${latestTrip?.destination || 'Goa'}`}
+                  </h3>
                   <Badge icon="Clock" label="In progress" tone={TONE.estimated} />
                 </div>
                 <div className="mt-1 flex items-center gap-1 text-xs text-medium-gray">
-                  <Icon.Calendar size={13} /> 14–17 Nov · 2 travellers
+                  <Icon.Calendar size={13} /> {latestTrip?.travelDates || '14–17 Nov'} · 2 travellers
                 </div>
                 <div className="mt-3">
                   <ProgressBar value={45} label="Trip progress" detail="Comparing routes" />
@@ -94,9 +169,9 @@ export default function Home({ go, onExplore }: { go: Go; onExplore: (d: Destina
             </div>
             <div className="mt-4 grid grid-cols-3 gap-3">
               {[
-                ["127 kg", "CO₂e avoided"],
-                ["6", "Lower-impact choices"],
-                ["4", "Trips optimized"],
+                [`${ecoImpact.carbonAvoidedKg} kg`, "CO₂e avoided"],
+                [`${ecoImpact.sustainableChoices}`, "Lower-impact choices"],
+                [`${ecoImpact.tripsOptimized}`, "Trips optimized"],
               ].map(([v, l]) => (
                 <div key={l}>
                   <div className="font-mono text-2xl font-bold text-emerald-400">{v}</div>
@@ -114,10 +189,10 @@ export default function Home({ go, onExplore }: { go: Go; onExplore: (d: Destina
         <section className="mt-12">
           <SectionTitle title="Recommended for you" action="See all" onAction={() => go("discover")} />
           <p className="-mt-2 mb-4 flex items-center gap-1.5 text-xs text-medium-gray">
-            <Icon.AI size={13} className="text-ai" /> Matched to your priorities: high sustainability, step-free preferred.
+            <Icon.AI size={13} className="text-ai" /> Matched to your priorities: {ecoPriorityLabel}.
           </p>
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-2">
-            {recommended.map((d) => (
+            {displayRecommended.map((d) => (
               <DestinationCard key={d.id} d={d} onExplore={onExplore} />
             ))}
           </div>
@@ -127,7 +202,7 @@ export default function Home({ go, onExplore }: { go: Go; onExplore: (d: Destina
         <section className="mt-12">
           <SectionTitle title="Explore destinations" action="Open Discover" onAction={() => go("discover")} />
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {explore.map((d) => (
+            {displayExplore.map((d) => (
               <DestinationCard key={d.id} d={d} onExplore={onExplore} />
             ))}
           </div>
@@ -142,7 +217,7 @@ export default function Home({ go, onExplore }: { go: Go; onExplore: (d: Destina
               <Badge icon="Weather" label="OpenWeather" tone={TONE.weather} />
             </div>
             <div className="mt-4 space-y-3">
-              {DESTINATIONS.slice(0, 2).map((d) => (
+              {destList.slice(0, 2).map((d) => (
                 <div key={d.id} className="flex items-center gap-3 rounded-lg border border-border p-3">
                   <span className="grid h-10 w-10 place-items-center rounded-lg bg-weather-soft text-weather">
                     <Icon.Weather size={20} />

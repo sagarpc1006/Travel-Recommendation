@@ -1,9 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import AppShell from "../components/AppShell";
 import { Icon, type IconName } from "../components/icons";
 import { Button, Badge, TONE } from "../components/ui";
 import { DestinationCard } from "../components/DestinationCard";
 import { DESTINATIONS, type Destination } from "../data/destinations";
+import { discoverPlaces } from "../services/discoverAPI";
+import { apiPlaceToDestination, figmaCategoryToBackendCategory } from "../services/adapters";
 
 type Go = (route: string) => void;
 
@@ -54,6 +56,12 @@ export default function Discover({ go, onExplore }: { go: Go; onExplore: (d: Des
   const [activeId, setActiveId] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
 
+  // Real backend API state
+  const [places, setPlaces] = useState<Destination[]>(DESTINATIONS);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const searchTimerRef = useRef<number | null>(null);
+
   const activeFilterCount =
     filters.types.length +
     filters.access.length +
@@ -62,8 +70,47 @@ export default function Discover({ go, onExplore }: { go: Go; onExplore: (d: Des
     (filters.ecoStays ? 1 : 0) +
     (filters.maxDistance < 2000 ? 1 : 0);
 
+  // Fetch real destinations from Django /api/discover/
+  const fetchDestinations = async (searchQuery: string, typesList: string[]) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const backendCat = typesList.length === 1 ? figmaCategoryToBackendCategory(typesList[0]) : undefined;
+      const res = await discoverPlaces(searchQuery, backendCat);
+      if (res && res.success && Array.isArray(res.places)) {
+        const mapped = res.places.map(apiPlaceToDestination);
+        setPlaces(mapped.length > 0 ? mapped : searchQuery.trim() ? [] : DESTINATIONS);
+      } else {
+        // Fallback to local destinations if empty response
+        setPlaces(DESTINATIONS);
+      }
+    } catch (err: any) {
+      console.warn("Discover API request failed, using local destinations:", err);
+      setError("Unable to connect to live destinations server. Showing cached places.");
+      setPlaces(DESTINATIONS);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (searchTimerRef.current) {
+      window.clearTimeout(searchTimerRef.current);
+    }
+    // Debounce API calls by 400ms for search typing
+    searchTimerRef.current = window.setTimeout(() => {
+      fetchDestinations(query, filters.types);
+    }, 400);
+
+    return () => {
+      if (searchTimerRef.current) {
+        window.clearTimeout(searchTimerRef.current);
+      }
+    };
+  }, [query, filters.types]);
+
   const results = useMemo(() => {
-    let list = DESTINATIONS.filter((d) => {
+    let list = places.filter((d) => {
       if (query.trim()) {
         const q = query.toLowerCase();
         if (!(`${d.name} ${d.region} ${d.bestFor.join(" ")}`.toLowerCase().includes(q))) return false;
@@ -91,7 +138,7 @@ export default function Discover({ go, onExplore }: { go: Go; onExplore: (d: Des
       popular: (a, b) => b.score - a.score,
     };
     return [...list].sort(sorters[sort]);
-  }, [query, filters, sort]);
+  }, [places, query, filters, sort]);
 
   function toggleIn(key: "types" | "access", v: string) {
     setFilters((f) => ({
@@ -222,7 +269,36 @@ export default function Discover({ go, onExplore }: { go: Go; onExplore: (d: Des
         <div className="mt-6 grid gap-6 lg:grid-cols-[1.35fr_1fr]">
           {/* Results */}
           <div>
-            {results.length === 0 ? (
+            {error && (
+              <div className="mb-4 flex items-center justify-between rounded-xl border border-error/20 bg-error-soft/60 px-4 py-3 text-xs text-error">
+                <div className="flex items-center gap-2">
+                  <Icon.Warning size={15} />
+                  <span>{error}</span>
+                </div>
+                <button
+                  onClick={() => fetchDestinations(query, filters.types)}
+                  className="font-medium underline hover:text-near-black"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {loading && places.length === 0 ? (
+              <div className="grid gap-5 sm:grid-cols-2">
+                {[1, 2, 3, 4].map((n) => (
+                  <div key={n} className="overflow-hidden rounded-xl border border-border bg-card p-4 animate-pulse">
+                    <div className="h-44 w-full rounded-lg bg-sage-200/60" />
+                    <div className="mt-3 h-5 w-3/4 rounded bg-sage-200/70" />
+                    <div className="mt-2 h-4 w-1/2 rounded bg-sage-100" />
+                    <div className="mt-4 flex gap-2">
+                      <div className="h-7 w-20 rounded-full bg-sage-100" />
+                      <div className="h-7 w-20 rounded-full bg-sage-100" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : results.length === 0 ? (
               <div className="rounded-xl border border-dashed border-mist bg-card/60 p-10 text-center">
                 <span className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-soft-gray text-medium-gray">
                   <Icon.Search size={22} />

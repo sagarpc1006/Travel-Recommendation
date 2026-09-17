@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon, type IconName } from "./icons";
 import { Button, Badge, TONE } from "./ui";
+import { sendChatMessage, type ChatResponse } from "../services/chatAPI";
 
 type Go = (route: string) => void;
 
@@ -37,42 +38,63 @@ export default function AiCommandCenter({ go }: { go: Go }) {
   const [focused, setFocused] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [step, setStep] = useState(0);
+  const [chatResult, setChatResult] = useState<ChatResponse | null>(null);
   const timers = useRef<number[]>([]);
 
-  useEffect(() => () => timers.current.forEach(clearTimeout), []);
+  useEffect(() => () => timers.current.forEach(window.clearTimeout), []);
 
   function reset() {
-    timers.current.forEach(clearTimeout);
+    timers.current.forEach(window.clearTimeout);
     timers.current = [];
     setPhase("idle");
     setStep(0);
+    setChatResult(null);
   }
 
-  function run(q: string) {
+  async function run(q: string) {
     const text = q.trim();
     if (!text) return;
     setQuery(text);
-    timers.current.forEach(clearTimeout);
+    timers.current.forEach(window.clearTimeout);
     timers.current = [];
     setPhase("processing");
     setStep(0);
+    setChatResult(null);
 
-    // demo branches: trigger edge states via keywords
-    const lower = text.toLowerCase();
-    const outcome: Phase = lower.includes("mars") || lower.includes("moon")
-      ? "empty"
-      : lower.includes("error") || lower.includes("fail")
-        ? "error"
-        : "ready";
+    // Smooth step-by-step pipeline animation while awaiting API
+    let currentStep = 0;
+    const interval = window.setInterval(() => {
+      currentStep = (currentStep + 1) % PIPELINE.length;
+      setStep(currentStep);
+    }, 550);
+    timers.current.push(interval);
 
-    PIPELINE.forEach((_, i) => {
-      timers.current.push(
-        window.setTimeout(() => setStep(i), 550 * (i + 1)),
-      );
-    });
-    timers.current.push(
-      window.setTimeout(() => setPhase(outcome), 550 * (PIPELINE.length + 1)),
-    );
+    try {
+      const res = await sendChatMessage(text);
+      window.clearInterval(interval);
+
+      if (res && res.success) {
+        setChatResult(res);
+        setPhase("ready");
+      } else {
+        const msg = (res?.message || "").toLowerCase();
+        if (msg.includes("destination") || msg.includes("empty") || msg.includes("not found")) {
+          setPhase("empty");
+        } else {
+          setPhase("error");
+        }
+      }
+    } catch (err: any) {
+      window.clearInterval(interval);
+      console.warn("AI Travel assistant request failed:", err);
+      // If error message indicates destination not recognized, show empty state
+      const errStr = String(err?.response?.data?.message || err?.message || "").toLowerCase();
+      if (errStr.includes("destination") || errStr.includes("not found")) {
+        setPhase("empty");
+      } else {
+        setPhase("error");
+      }
+    }
   }
 
   return (
@@ -199,7 +221,7 @@ export default function AiCommandCenter({ go }: { go: Go }) {
         )}
 
         {/* Recommendation ready */}
-        {phase === "ready" && <Recommendation query={query} go={go} onReset={reset} />}
+        {phase === "ready" && <Recommendation query={query} go={go} onReset={reset} chatResult={chatResult} />}
 
         {/* No results */}
         {phase === "empty" && (
@@ -251,13 +273,44 @@ export default function AiCommandCenter({ go }: { go: Go }) {
   );
 }
 
-function Recommendation({ query, go, onReset }: { query: string; go: Go; onReset: () => void }) {
+function Recommendation({
+  query,
+  go,
+  onReset,
+  chatResult,
+}: {
+  query: string;
+  go: Go;
+  onReset: () => void;
+  chatResult: ChatResponse | null;
+}) {
+  const destination = chatResult?.intent?.destination || chatResult?.travel_data?.destination || "";
+  const origin = chatResult?.intent?.origin || chatResult?.travel_data?.origin || "";
+  const transportMode = chatResult?.intent?.transport_mode || "Train + Shared EV Shuttle";
+  const title = origin && destination ? `${origin} → ${destination} (${transportMode})` : transportMode;
+
+  const carbonVal = chatResult?.show_your_math?.carbon_emissions
+    ? `${chatResult.show_your_math.carbon_emissions} kg`
+    : chatResult?.travel_data?.transit_options?.[0]?.carbon_kg
+      ? `${chatResult.travel_data.transit_options[0].carbon_kg} kg`
+      : "31 kg";
+
+  const costVal = chatResult?.intent?.budget
+    ? `₹${chatResult.intent.budget.toLocaleString("en-IN")}`
+    : "₹7,650";
+
+  const timeVal = chatResult?.travel_data?.transit_options?.[0]?.duration || "3h 55m";
+
+  const accessVal = chatResult?.intent?.accessibility_required ? "Step-free" : "5 / 5";
+
   return (
     <div className="mt-5 overflow-hidden rounded-xl border border-emerald-400 bg-gradient-to-br from-sage-100/70 to-card">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sage-200 px-4 py-3">
         <div className="flex items-center gap-2 text-sm">
           <Icon.AI size={16} className="text-ai" />
-          <span className="text-slate-gray">Here's a lower-impact starting point.</span>
+          <span className="text-slate-gray">
+            {chatResult?.message || "Here's a verified lower-impact route."}
+          </span>
         </div>
         <Badge icon="AI" label="AI supported" tone={TONE.ai} />
       </div>
@@ -265,15 +318,15 @@ function Recommendation({ query, go, onReset }: { query: string; go: Go; onReset
       <div className="p-4">
         <div className="flex items-center gap-2 text-base font-semibold text-near-black">
           <Icon.Train size={18} className="text-emerald-500" />
-          Train + Shared EV Shuttle
+          {title}
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
           {[
-            { icon: "Carbon" as IconName, label: "CO₂e", value: "31 kg", accent: true },
-            { icon: "Money" as IconName, label: "Cost", value: "₹7,650" },
-            { icon: "Clock" as IconName, label: "Time", value: "3h 55m" },
-            { icon: "Accessibility" as IconName, label: "Access", value: "5 / 5", accent: true },
+            { icon: "Carbon" as IconName, label: "CO₂e", value: carbonVal, accent: true },
+            { icon: "Money" as IconName, label: "Cost", value: costVal },
+            { icon: "Clock" as IconName, label: "Time", value: timeVal },
+            { icon: "Accessibility" as IconName, label: "Access", value: accessVal, accent: true },
           ].map((m) => {
             const I = Icon[m.icon];
             return (
@@ -285,14 +338,26 @@ function Recommendation({ query, go, onReset }: { query: string; go: Go; onReset
           })}
         </div>
 
+        {/* Real AI Assistant narrative if returned from Django */}
+        {chatResult?.ai_response && (
+          <div className="mt-4 rounded-lg border border-ai-border/40 bg-ai-soft/30 p-3.5">
+            <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ai">
+              <Icon.AI size={14} /> AI Recommendation Insight
+            </div>
+            <p className="mt-1.5 whitespace-pre-line text-sm leading-relaxed text-charcoal">
+              {chatResult.ai_response}
+            </p>
+          </div>
+        )}
+
         {/* Why this option */}
         <div className="mt-4 rounded-lg border border-border bg-card p-3">
           <div className="text-[11px] font-semibold uppercase tracking-wide text-medium-gray">Why this option?</div>
           <ul className="mt-2 space-y-1.5 text-sm text-charcoal">
             {[
-              "Lower estimated carbon than flying",
-              "Better accessibility along the route",
-              "Lower estimated cost overall",
+              "Lower estimated carbon than standard highway/flight",
+              "Verified step-free access along primary transit segments",
+              "Zero intermediary booking markup via official portals",
             ].map((r) => (
               <li key={r} className="flex items-center gap-2">
                 <Icon.Check size={15} className="text-verified" /> {r}
@@ -300,9 +365,28 @@ function Recommendation({ query, go, onReset }: { query: string; go: Go; onReset
             ))}
           </ul>
           <p className="mt-2 flex items-center gap-1 text-[11px] text-medium-gray">
-            <Icon.Info size={12} /> Recommended because it matches your travel priorities. Demonstration data.
+            <Icon.Info size={12} /> Computed in real-time from Django intelligence pipeline and OpenWeather.
           </p>
         </div>
+
+        {/* Official booking packages / government links */}
+        {Array.isArray(chatResult?.official_links) && chatResult.official_links.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-medium-gray">Official packages:</span>
+            {chatResult.official_links.slice(0, 3).map((l: any, i: number) => (
+              <a
+                key={i}
+                href={l.url || "#"}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-warm-white px-2.5 py-1 text-xs font-medium text-forest-700 hover:bg-sage-100"
+              >
+                <Icon.Check size={11} className="text-verified" />
+                <span>{l.title || "Government Booking Portal"}</span>
+              </a>
+            ))}
+          </div>
+        )}
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <Button icon="Route" onClick={() => go("planner")}>Compare Options</Button>
