@@ -1,0 +1,177 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import 'tailwindcss';
+
+@theme {
+  /* ---- Brand: forest / emerald / sage ---- */
+  --color-forest-900: #0d2a1e;
+  --color-forest-800: #123726;
+  --color-forest-700: #1b4332;
+  --color-forest-600: #245741;
+  --color-forest-500: #2d6a4f;
+  --color-emerald-500: #40916c;
+  --color-emerald-400: #52b788;
+  --color-sage-400: #74a58c;
+  --color-sage-300: #95c4ab;
+  --color-sage-200: #c3ddce;
+  --color-sage-100: #e4efe8;
+
+  /* ---- Neutrals ---- */
+  --color-warm-white: #f8f8f4;
+  --color-paper: #ffffff;
+  --color-soft-gray: #eef1ef;
+  --color-mist: #dfe4e1;
+  --color-medium-gray: #8b9691;
+  --color-slate-gray: #5a655f;
+  --color-charcoal: #2b332f;
+  --color-near-black: #10160f;
+
+  /* ---- Semantic mappings ---- */
+  --color-background: var(--color-warm-white);
+  --color-foreground: var(--color-near-black);
+  --color-card: var(--color-paper);
+  --color-card-foreground: var(--color-charcoal);
+  --color-primary: var(--color-forest-700);
+  --color-primary-foreground: #f4faf6;
+  --color-secondary: var(--color-sage-100);
+  --color-secondary-foreground: var(--color-forest-700);
+  --color-muted: var(--color-soft-gray);
+  --color-muted-foreground: var(--color-slate-gray);
+  --color-accent: var(--color-emerald-500);
+  --color-accent-foreground: #ffffff;
+  --color-border: var(--color-mist);
+  --color-ring: var(--color-emerald-500);
+
+  /* ---- Semantic states ---- */
+  --color-success: #2e7d50;
+  --color-success-soft: #e6f2ea;
+  --color-warning: #b0770f;
+  --color-warning-soft: #faf1de;
+  --color-error: #c0392b;
+  --color-error-soft: #fbeae8;
+  --color-info: #2b6796;
+  --color-info-soft: #e6f0f6;
+
+  /* ---- Product-specific ---- */
+  --color-carbon: #4a6b5a;
+  --color-carbon-soft: #e8efeb;
+  --color-access: #1f7a8c;
+  --color-access-soft: #e2f0f2;
+  --color-verified: #2e7d50;
+  --color-estimated: #b0770f;
+  --color-ai: #5b57c7;
+  --color-ai-soft: #ecebf9;
+  --color-ai-border: #d3d1f2;
+  --color-weather: #3d7cb3;
+  --color-weather-soft: #e7f0f7;
+
+  /* ---- Radius ---- */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+
+  /* ---- Motion ---- */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-feature-settings: 'cv05', 'ss01';
+  }
+  ::selection {
+    background-color: var(--color-emerald-400);
+    color: #ffffff;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+}
+
+/* Elevation scale */
+.elev-subtle {
+  box-shadow: 0 1px 2px rgba(16, 22, 15, 0.05);
+}
+.elev-card {
+  box-shadow: 0 1px 3px rgba(16, 22, 15, 0.06), 0 6px 16px -8px rgba(16, 22, 15, 0.08);
+}
+.elev-raised {
+  box-shadow: 0 2px 6px rgba(16, 22, 15, 0.07), 0 14px 32px -12px rgba(16, 22, 15, 0.14);
+}
+.elev-modal {
+  box-shadow: 0 8px 24px rgba(16, 22, 15, 0.12), 0 32px 64px -16px rgba(16, 22, 15, 0.24);
+}
+
+.font-mono {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* Scrollbar: hidden until scroll */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+*:hover {
+  scrollbar-color: var(--color-mist) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*:hover::-webkit-scrollbar-thumb {
+  background: var(--color-mist);
+  background-clip: content-box;
+}
+
+@keyframes ai-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes ai-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+/* Phase 6 — restrained page transition (route change) */
+@keyframes page-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.page-enter {
+  animation: page-enter 0.32s var(--ease-out);
+}
+
+/* Phase 5 — skeleton shimmer */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  background-size: 200% 100%;
+  animation: ai-shimmer 1.4s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after { animation: none; }
+  .page-enter { animation: none; }
+  * { scroll-behavior: auto !important; }
+}
