@@ -22,6 +22,7 @@ import {
 } from "../data/tripOptions";
 import { saveTrip as apiSaveTrip } from "../services/tripAPI";
 import {
+  generateRecommendations,
   getRecommendations,
   type RecommendationRequest,
 } from "../services/recommendationAPI";
@@ -29,8 +30,21 @@ import { apiRecommendationToTripOption } from "../services/adapters";
 
 type Go = (route: string) => void;
 type Weights = { carbon: number; access: number; cost: number; time: number };
+type RequestStatus = "idle" | "generating" | "success" | "error";
 
 const inr = (n: number) => `₹${n.toLocaleString("en-IN")}`;
+
+function normalizeWeights(w: Weights): { carbon: number; accessibility: number; cost: number; time: number } {
+  const sum = (w.carbon || 0) + (w.access || 0) + (w.cost || 0) + (w.time || 0);
+  if (sum <= 0) {
+    return { carbon: 0.40, accessibility: 0.30, cost: 0.15, time: 0.15 };
+  }
+  const c = Math.round((w.carbon / sum) * 10000) / 10000;
+  const a = Math.round((w.access / sum) * 10000) / 10000;
+  const co = Math.round((w.cost / sum) * 10000) / 10000;
+  const t = Math.round((1.0 - (c + a + co)) * 10000) / 10000;
+  return { carbon: c, accessibility: a, cost: co, time: t };
+}
 
 function usePrefersReducedMotion() {
   const [rm, setRm] = useState(false);
@@ -57,6 +71,7 @@ export default function Planner({ go }: { go: Go }) {
   const [editReq, setEditReq] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [toast, setToast] = useState<string | null>(null);
+  const [requestStatus, setRequestStatus] = useState<RequestStatus>("idle");
 
   // Dynamic Trip Requirement state
   const [tripReq, setTripReq] = useState({
@@ -85,16 +100,11 @@ export default function Planner({ go }: { go: Go }) {
 
   // Function to call Django POST /api/recommendations/
   async function fetchRecommendations(currentWeights: Weights, reqData = tripReq) {
+    setRequestStatus("generating");
     setLoadingRecs(true);
     setRecError(null);
     try {
-      const total = currentWeights.carbon + currentWeights.access + currentWeights.cost + currentWeights.time || 1;
-      const normalizedWeights = {
-        carbon: parseFloat((currentWeights.carbon / total).toFixed(4)),
-        accessibility: parseFloat((currentWeights.access / total).toFixed(4)),
-        cost: parseFloat((currentWeights.cost / total).toFixed(4)),
-        time: parseFloat((currentWeights.time / total).toFixed(4)),
-      };
+      const normalizedWeights = normalizeWeights(currentWeights);
 
       const budgetNumber = typeof reqData.budget === "string"
         ? parseInt(reqData.budget.replace(/[^0-9]/g, ""), 10) || 10000
@@ -111,7 +121,7 @@ export default function Planner({ go }: { go: Go }) {
         weights: normalizedWeights,
       };
 
-      const response = await getRecommendations(payload);
+      const response = await generateRecommendations(payload);
       if (response?.recommendations?.results && Array.isArray(response.recommendations.results) && response.recommendations.results.length > 0) {
         const converted = response.recommendations.results.map((r, i) =>
           apiRecommendationToTripOption(
@@ -124,15 +134,26 @@ export default function Planner({ go }: { go: Go }) {
         );
         setPlannerOptions(converted);
         setIsLiveRecs(true);
+        setRequestStatus("success");
         setRecError(null);
       } else {
-        throw new Error("No recommendation results received from backend.");
+        throw new Error("No recommendation results received from backend recommendation engine.");
       }
     } catch (err: any) {
       console.warn("Backend recommendation fetch failed:", err);
-      const errMsg = err?.response?.data?.error || err?.message || "Could not reach recommendation engine.";
+      let errMsg = "Could not reach recommendation engine.";
+      if (err?.response?.status === 401) {
+        errMsg = "Unauthorized: Please sign in or check your credentials.";
+      } else if (err?.response?.status === 400) {
+        errMsg = err?.response?.data?.errors ? JSON.stringify(err.response.data.errors) : "Bad request parameters.";
+      } else if (err?.response?.status === 500) {
+        errMsg = "Server error while calculating travel recommendations.";
+      } else if (err?.message) {
+        errMsg = err.message;
+      }
       setRecError(errMsg);
       setIsLiveRecs(false);
+      setRequestStatus("error");
     } finally {
       setLoadingRecs(false);
     }
@@ -212,6 +233,14 @@ export default function Planner({ go }: { go: Go }) {
       status: "planned",
       cover_image: "https://images.unsplash.com/photo-1512343879784-a960bf40e7f2?w=800&q=80",
       stays: "Verified Coastal Eco Stay",
+      recommendation_data: {
+        id: optionToSave.id,
+        transport: optionToSave.transport,
+        score: optionToSave.score,
+        sub: optionToSave.sub,
+        why_recommended: optionToSave.reasons,
+      },
+      show_your_math_data: optionToSave.rawShowYourMath || null,
     };
 
     try {
@@ -234,9 +263,10 @@ export default function Planner({ go }: { go: Go }) {
     }
   }
 
-  const carbonCut = standard && ecoTwin && standard.carbonKg > 0
-    ? Math.max(0, Math.round(((standard.carbonKg - ecoTwin.carbonKg) / standard.carbonKg) * 100))
-    : 0;
+  const carbonCut = recommended?.explanation?.comparison?.carbon_reduction_percent
+    ?? (standard && ecoTwin && standard.carbonKg > 0
+      ? Math.max(0, Math.round(((standard.carbonKg - ecoTwin.carbonKg) / standard.carbonKg) * 100))
+      : 0);
 
   return (
     <AppShell active="planner" go={go}>
@@ -797,8 +827,24 @@ function RecommendedCard({
 
 /* ---- Eco-Twin ---- */
 function EcoTwinSection({ standard, ecoTwin, carbonCut }: { standard: TripOption; ecoTwin: TripOption; carbonCut: number }) {
-  const dTime = ecoTwin.timeMin - standard.timeMin;
-  const dCost = standard.cost - ecoTwin.cost;
+  const comp = ecoTwin.explanation?.comparison;
+  const dTime = comp?.time_difference_minutes !== undefined
+    ? comp.time_difference_minutes
+    : (ecoTwin.timeMin - standard.timeMin);
+  const dCost = comp?.cost_difference !== undefined
+    ? -comp.cost_difference
+    : (standard.cost - ecoTwin.cost);
+  const timeLabel = dTime >= 0 ? `+${dTime} min` : `${dTime} min`;
+  const costLabel = dCost >= 0 ? `${inr(dCost)} less` : `${inr(Math.abs(dCost))} more`;
+  const accDiff = comp?.accessibility_difference;
+  const accLabel = accDiff !== undefined && accDiff > 0
+    ? `+${accDiff} rating`
+    : (ecoTwin.accessItems?.some((a) => a.status === "verified") ? "Fully accessible" : `${ecoTwin.access}/5 Access`);
+
+  const reasonsList = Array.isArray(ecoTwin.explanation?.why_recommended) && ecoTwin.explanation.why_recommended.length > 0
+    ? ecoTwin.explanation.why_recommended.slice(0, 3)
+    : ["Lower estimated carbon", "Better accessibility", "Lower estimated cost"];
+
   return (
     <section className="rounded-2xl border border-emerald-400 bg-gradient-to-br from-sage-100 to-card p-5 elev-card">
       <div className="flex items-center gap-2">
@@ -809,13 +855,13 @@ function EcoTwinSection({ standard, ecoTwin, carbonCut }: { standard: TripOption
         </div>
       </div>
 
-      {/* Trade-off statement — one of the strongest moments */}
+      {/* Trade-off statement — authoritative backend calculations */}
       <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
         {[
-          [`+${dTime} min`, "more travel", "Clock", "var(--color-estimated)"],
-          [`${inr(dCost)} less`, "cheaper", "Money", "var(--color-success)"],
+          [timeLabel, "travel difference", "Clock", "var(--color-estimated)"],
+          [costLabel, "vs baseline", "Money", "var(--color-success)"],
           [`${carbonCut}% less`, "carbon", "Carbon", "var(--color-carbon)"],
-          ["Fully accessible", "step-free", "Accessibility", "var(--color-access)"],
+          [accLabel, "accessibility", "Accessibility", "var(--color-access)"],
         ].map(([big, small, icon, color]) => {
           const I = Icon[icon as IconName];
           return (
@@ -837,7 +883,7 @@ function EcoTwinSection({ standard, ecoTwin, carbonCut }: { standard: TripOption
       <div className="mt-4 rounded-lg border border-border bg-card p-3">
         <div className="flex items-center gap-1.5 text-xs font-semibold text-charcoal"><Icon.AI size={14} className="text-ai" /> Why is this my Eco-Twin?</div>
         <ul className="mt-2 grid gap-1 sm:grid-cols-3">
-          {["Lower estimated carbon", "Better accessibility", "Lower estimated cost"].map((r) => (
+          {reasonsList.map((r: string) => (
             <li key={r} className="flex items-start gap-1.5 text-xs text-slate-gray"><Icon.Check size={13} className="mt-0.5 shrink-0 text-emerald-500" /> {r}</li>
           ))}
         </ul>
@@ -1001,21 +1047,37 @@ function Row({ icon, k, v }: { icon: IconName; k: string; v: string }) {
 
 /* ---- Show your math (inline card) ---- */
 function ShowYourMathCard({ option, onExpand }: { option: TripOption; onExpand: () => void }) {
+  const math = option.rawShowYourMath;
   return (
     <section className="rounded-2xl border border-border bg-card p-5 elev-card">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-near-black">Show Your Math</h2>
-        <Badge icon="Info" label="Estimated" tone={TONE.estimated} />
+        <Badge
+          icon={math?.calculation?.formula ? "Verified" : "Info"}
+          label={math?.calculation?.formula ? "Authoritative" : "Estimated"}
+          tone={math?.calculation?.formula ? TONE.verified : TONE.estimated}
+        />
       </div>
-      <p className="mt-1 text-sm text-slate-gray">See how EcoTrail estimated the travel emissions.</p>
+      <p className="mt-1 text-sm text-slate-gray">
+        {math?.calculation?.formula
+          ? "Authoritative multi-criteria scoring calculation from Django backend."
+          : "See how EcoTrail estimated the travel emissions."}
+      </p>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-warm-white p-3 text-center text-xs">
-        <span className="flex-1 rounded-md bg-card px-2 py-2 font-medium text-charcoal">Activity data<br /><span className="text-medium-gray">distance × mode</span></span>
-        <Icon.Close size={14} className="rotate-45 text-medium-gray" />
-        <span className="flex-1 rounded-md bg-card px-2 py-2 font-medium text-charcoal">Emission factor<br /><span className="text-medium-gray">kg / km</span></span>
-        <span className="text-medium-gray">=</span>
-        <span className="flex-1 rounded-md bg-carbon-soft px-2 py-2 font-semibold text-carbon">Estimated CO₂e</span>
-      </div>
+      {math?.calculation?.formula ? (
+        <div className="mt-4 rounded-lg border border-border bg-warm-white p-3 font-mono text-xs text-charcoal">
+          <div className="text-[11px] font-semibold text-medium-gray mb-1 uppercase tracking-wide">Composite Formula</div>
+          <div className="text-forest-700 font-semibold">{math.calculation.formula}</div>
+        </div>
+      ) : (
+        <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-warm-white p-3 text-center text-xs">
+          <span className="flex-1 rounded-md bg-card px-2 py-2 font-medium text-charcoal">Activity data<br /><span className="text-medium-gray">distance × mode</span></span>
+          <Icon.Close size={14} className="rotate-45 text-medium-gray" />
+          <span className="flex-1 rounded-md bg-card px-2 py-2 font-medium text-charcoal">Emission factor<br /><span className="text-medium-gray">kg / km</span></span>
+          <span className="text-medium-gray">=</span>
+          <span className="flex-1 rounded-md bg-carbon-soft px-2 py-2 font-semibold text-carbon">Estimated CO₂e</span>
+        </div>
+      )}
 
       <div className="mt-3 font-mono text-2xl font-bold text-carbon">{option.carbonKg} kg <span className="text-sm font-normal text-medium-gray">total est.</span></div>
       <Button variant="tertiary" className="mt-3 w-full" icon="Carbon" onClick={onExpand}>View calculation</Button>

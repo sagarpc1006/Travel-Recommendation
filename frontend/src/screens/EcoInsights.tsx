@@ -1,15 +1,102 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import AppShell from "../components/AppShell";
 import { Icon, type IconName } from "../components/icons";
 import { Button, Badge, TONE, ProgressBar } from "../components/ui";
-import { INSIGHTS, TRIPS } from "../data/trips";
+import { INSIGHTS, TRIPS, type Trip } from "../data/trips";
+import { getRecentTrips } from "../services/tripAPI";
+import { apiTripToTrip } from "../services/adapters";
 
 type Go = (route: string) => void;
 
 export default function EcoInsights({ go }: { go: Go }) {
   const [range, setRange] = useState<"year" | "month">("year");
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    async function loadTrips() {
+      try {
+        const data = await getRecentTrips();
+        if (active && Array.isArray(data) && data.length > 0) {
+          const mapped = data.map((item: any) =>
+            item.days ? (item as Trip) : apiTripToTrip(item)
+          );
+          setTrips(mapped);
+        }
+      } catch (err) {
+        console.warn("Could not fetch trips for eco insights:", err);
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+    loadTrips();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const effectiveTrips = trips.length > 0 ? trips : TRIPS;
+
+  const totalEstimatedKg = useMemo(() => {
+    if (trips.length > 0) {
+      return Math.round(trips.reduce((sum, t) => sum + (t.carbonKg || 0), 0));
+    }
+    return INSIGHTS.totalEstimatedKg;
+  }, [trips]);
+
+  const lifetimeAvoidedKg = useMemo(() => {
+    if (trips.length > 0) {
+      return Math.round(
+        trips.reduce((sum, t) => sum + Math.max(0, (t.standardCarbonKg || 0) - (t.carbonKg || 0)), 0)
+      );
+    }
+    return INSIGHTS.lifetimeAvoidedKg;
+  }, [trips]);
+
+  const sustainableChoices = useMemo(() => {
+    if (trips.length > 0) {
+      return trips.filter((t) => (t.score && t.score >= 80) || t.ecoTwin).length;
+    }
+    return INSIGHTS.sustainableChoices;
+  }, [trips]);
+
+  const tripsOptimizedCount = trips.length > 0 ? trips.length : INSIGHTS.tripsOptimized;
+
+  const modesData = useMemo(() => {
+    if (trips.length === 0) return INSIGHTS.modes;
+
+    let railKg = 0;
+    let busKg = 0;
+    let evKg = 0;
+
+    trips.forEach((t) => {
+      const modeLower = (t.region || "").toLowerCase();
+      const kg = t.carbonKg || 0;
+      if (modeLower.includes("train") || modeLower.includes("rail")) {
+        railKg += kg;
+      } else if (modeLower.includes("bus") || modeLower.includes("coach")) {
+        busKg += kg;
+      } else if (modeLower.includes("ev") || modeLower.includes("electric")) {
+        evKg += kg;
+      } else {
+        railKg += kg * 0.6;
+        evKg += kg * 0.25;
+        busKg += kg * 0.15;
+      }
+    });
+
+    const list = [
+      { mode: "Train & Rail", kg: Math.round(railKg), color: "var(--color-emerald-500)" },
+      { mode: "Electric / EV", kg: Math.round(evKg), color: "var(--color-forest-700)" },
+      { mode: "Bus & Coach", kg: Math.round(busKg), color: "var(--color-slate-gray)" },
+    ].filter((m) => m.kg > 0);
+
+    return list.length > 0 ? list : INSIGHTS.modes;
+  }, [trips]);
+
+  const totalModes = modesData.reduce((n, m) => n + m.kg, 0) || 1;
   const maxStd = Math.max(...INSIGHTS.monthly.map((m) => m.std));
-  const totalModes = INSIGHTS.modes.reduce((n, m) => n + m.kg, 0);
 
   return (
     <AppShell active="insights" go={go}>
@@ -21,9 +108,9 @@ export default function EcoInsights({ go }: { go: Go }) {
 
         {/* Headline stats */}
         <div className="mt-6 grid gap-4 sm:grid-cols-3">
-          <StatCard icon="Leaf" label="Est. CO₂e avoided (lifetime)" value={`${INSIGHTS.lifetimeAvoidedKg} kg`} accent hint="vs standard equivalents" />
-          <StatCard icon="Carbon" label="Est. CO₂e this year" value={`${INSIGHTS.totalEstimatedKg} kg`} hint="across your EcoTrail trips" />
-          <StatCard icon="Route" label="Sustainable choices" value={`${INSIGHTS.sustainableChoices}`} hint={`${INSIGHTS.tripsOptimized} trips optimized`} />
+          <StatCard icon="Leaf" label="Est. CO₂e avoided (lifetime)" value={`${lifetimeAvoidedKg} kg`} accent hint="vs standard equivalents" />
+          <StatCard icon="Carbon" label="Est. CO₂e this year" value={`${totalEstimatedKg} kg`} hint="across your EcoTrail trips" />
+          <StatCard icon="Route" label="Sustainable choices" value={`${sustainableChoices}`} hint={`${tripsOptimizedCount} trips optimized`} />
         </div>
 
         <div className="mt-6 grid gap-6 lg:grid-cols-[1.5fr_1fr]">
@@ -68,12 +155,12 @@ export default function EcoInsights({ go }: { go: Go }) {
             <p className="text-xs text-medium-gray">Estimated CO₂e by how you travelled.</p>
             {/* stacked bar */}
             <div className="mt-4 flex h-4 overflow-hidden rounded-full">
-              {INSIGHTS.modes.map((m) => (
+              {modesData.map((m) => (
                 <div key={m.mode} style={{ width: `${(m.kg / totalModes) * 100}%`, background: m.color }} title={`${m.mode} ${m.kg} kg`} />
               ))}
             </div>
             <ul className="mt-4 space-y-2.5">
-              {INSIGHTS.modes.map((m) => (
+              {modesData.map((m) => (
                 <li key={m.mode} className="flex items-center justify-between text-sm">
                   <span className="flex items-center gap-2 text-charcoal"><span className="h-3 w-3 rounded-sm" style={{ background: m.color }} /> {m.mode}</span>
                   <span className="font-mono text-medium-gray">{m.kg} kg · {Math.round((m.kg / totalModes) * 100)}%</span>
@@ -87,8 +174,10 @@ export default function EcoInsights({ go }: { go: Go }) {
         <section className="mt-6 rounded-2xl border border-border bg-card p-5 elev-card">
           <h2 className="text-lg font-semibold text-near-black">Recent trip impact</h2>
           <div className="mt-4 space-y-4">
-            {TRIPS.slice(0, 3).map((t) => {
-              const cut = Math.round(((t.standardCarbonKg - t.carbonKg) / t.standardCarbonKg) * 100);
+            {effectiveTrips.slice(0, 3).map((t) => {
+              const cut = t.standardCarbonKg > 0
+                ? Math.round(((t.standardCarbonKg - t.carbonKg) / t.standardCarbonKg) * 100)
+                : 40;
               return (
                 <div key={t.id}>
                   <div className="flex items-center justify-between text-sm">

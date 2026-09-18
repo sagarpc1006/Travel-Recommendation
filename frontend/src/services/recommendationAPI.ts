@@ -1,8 +1,8 @@
 // EcoTrail Recommendation Service
 // Connects directly to Django REST Framework POST /api/recommendations/
 
-// @ts-ignore - api.js is existing JavaScript Axios client
-import api from './api.js';
+// @ts-ignore - client.js is existing JavaScript Axios client
+import apiClient from '../api/client.js';
 
 export interface RecommendationWeights {
   carbon: number;
@@ -115,13 +115,16 @@ export interface RecommendationResponse {
  * Calls the Django recommendation engine (POST /api/recommendations/)
  * to generate deterministically scored and ranked multi-modal travel options.
  */
-export async function getRecommendations(
+export async function generateRecommendations(
   payload: RecommendationRequest
 ): Promise<RecommendationResponse> {
-  const response = await api.post('/api/recommendations/', payload);
+  const response = await apiClient.post('/api/recommendations/', payload);
   return response.data;
 }
 
+export const getRecommendations = generateRecommendations;
+
 export default {
+  generateRecommendations,
   getRecommendations,
 };

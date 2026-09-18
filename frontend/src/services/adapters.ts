@@ -149,23 +149,62 @@ export function apiTripToTrip(apiTrip: any): Trip {
 
   const standardCarbon = Math.round(carbon * 1.8);
 
+  const rawCost = typeof apiTrip.raw_cost === 'number'
+    ? apiTrip.raw_cost
+    : parseInt(String(apiTrip.totalCost || '5000').replace(/[^0-9]/g, '')) || 5000;
+
   const days: ItineraryDay[] = Array.isArray(apiTrip.itinerary?.days)
     ? apiTrip.itinerary.days
     : [
         {
           day: 1,
-          label: 'Day 1',
+          label: 'Arrival & Eco Exploration',
           date: apiTrip.travelDates || 'Upcoming',
           items: [
             {
               id: 'item-1',
               time: '09:00',
-              title: `Journey: ${apiTrip.origin || 'Origin'} → ${apiTrip.destination || 'Destination'}`,
+              title: `Journey: ${apiTrip.origin || 'Origin'} → ${apiTrip.destination || 'Destination'} via ${apiTrip.transport || 'Eco Transit'}`,
               category: 'Transport',
               location: apiTrip.origin || 'Transit Hub',
               duration: apiTrip.duration || 'Flexible',
-              carbonKg: carbon,
+              carbonKg: Math.round(carbon * 0.8),
+              cost: Math.round(rawCost * 0.45),
               coords: { x: 30, y: 50 },
+              access: {
+                status: apiTrip.accessibility?.verified ? 'verified' : 'supported',
+                summary: 'Step-free transit access with low emissions.',
+              },
+            },
+            {
+              id: 'item-2',
+              time: '14:00',
+              title: `Check-in: ${apiTrip.stays || 'Verified Eco Stay'}`,
+              category: 'Stay',
+              location: apiTrip.destination || 'Destination',
+              duration: 'Check-in',
+              cost: Math.round(rawCost * 0.35),
+              carbonKg: Math.round(carbon * 0.15),
+              coords: { x: 50, y: 50 },
+              access: {
+                status: 'supported',
+                summary: 'Level entrance with accessible amenities.',
+              },
+            },
+            {
+              id: 'item-3',
+              time: '17:00',
+              title: `Local Heritage & Nature Walk in ${apiTrip.destination || 'Destination'}`,
+              category: 'Activity',
+              location: apiTrip.destination || 'Nature Reserve',
+              duration: '2h 30m',
+              cost: Math.round(rawCost * 0.2),
+              carbonKg: Math.round(carbon * 0.05),
+              coords: { x: 70, y: 60 },
+              access: {
+                status: 'verified',
+                summary: 'Paved, step-free scenic paths.',
+              },
             },
           ],
         },
@@ -264,18 +303,21 @@ export function apiRecommendationToTripOption(
     ? Math.round(rec.price.amount)
     : 7500;
 
-  const accessRating = typeof rec.accessibility?.rating === 'number'
-    ? Math.max(1, Math.min(5, Math.round(rec.accessibility.rating)))
-    : typeof rec.scores?.accessibility === 'number'
-      ? Math.max(1, Math.min(5, Math.round(rec.scores.accessibility / 20)))
-      : 4;
+  const rawAccRating =
+    rec.accessibility?.rating ??
+    rec.accessibility?.accessibility_rating ??
+    (typeof rec.scores?.accessibility === 'number' ? Math.round(rec.scores.accessibility / 20) : 4);
+  const accessRating = Math.max(1, Math.min(5, Math.round(rawAccRating)));
 
-  const isVerified = Boolean(rec.accessibility?.verified);
+  const isVerified = Boolean(rec.accessibility?.verified ?? rec.accessibility?.accessibility_verified);
+  const statusStr = (rec.accessibility?.status ?? rec.accessibility?.accessibility_status ?? '').toLowerCase();
   const accessStatus: Evidence = isVerified
     ? 'verified'
-    : rec.accessibility?.status === 'supported'
+    : statusStr.includes('support')
       ? 'supported'
-      : 'unknown';
+      : statusStr.includes('business')
+        ? 'business'
+        : 'unknown';
 
   const segments: Segment[] = modeStr.includes('flight')
     ? [

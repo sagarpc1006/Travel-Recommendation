@@ -1,7 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import AppShell from "../components/AppShell";
 import { Icon, type IconName } from "../components/icons";
-import { Button, Badge, TONE, Toggle } from "../components/ui";
+import { Button, Badge, TONE, Toggle, AiThinking } from "../components/ui";
+import {
+  getAccessibilityProfile,
+  updateAccessibilityProfile,
+  type AccessibilityProfileData,
+} from "../services/accessibilityAPI";
 
 type Go = (route: string) => void;
 
@@ -33,6 +38,38 @@ export default function AccessibilityProfile({ go }: { go: Go }) {
   const [usePersonalize, setUsePersonalize] = useState(true);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    async function loadProfile() {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await getAccessibilityProfile();
+        if (res?.success && res.profile && isMounted) {
+          const p = res.profile;
+          const hydrated: Record<string, string[]> = {};
+          if (p.step_free_required) hydrated.stepfree = ["Step-free required"];
+          if (p.wheelchair_required) hydrated.wheelchair = ["Wheelchair user"];
+          if (p.accessible_vehicle_required) hydrated.transport = ["Accessible transport required"];
+          if (p.elevator_preferred) hydrated.elevator = ["Elevator required"];
+          if (p.accessible_toilet_preferred) hydrated.bathroom = ["Accessible bathroom required"];
+          if (p.reduced_walking) hydrated.mobility = ["Minimal walking"];
+          if (p.accessible_venue_required) hydrated.cognitive = ["Simple, clear steps"];
+          setSelected(hydrated);
+        }
+      } catch (err: any) {
+        console.warn("Could not load accessibility profile from backend:", err);
+        if (isMounted) setError("Could not load your saved profile from the server.");
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    }
+    loadProfile();
+    return () => { isMounted = false; };
+  }, []);
 
   function pick(g: Group, opt: string) {
     setSkip((s) => ({ ...s, [g.key]: false }));
@@ -42,13 +79,39 @@ export default function AccessibilityProfile({ go }: { go: Go }) {
       return { ...sel, [g.key]: cur[0] === opt ? [] : [opt] };
     });
   }
+
   function preferNot(g: Group) {
     setSkip((s) => ({ ...s, [g.key]: !s[g.key] }));
     setSelected((sel) => ({ ...sel, [g.key]: [] }));
   }
-  function save() {
+
+  async function save() {
     setSaving(true);
-    window.setTimeout(() => { setSaving(false); setSaved(true); window.setTimeout(() => setSaved(false), 2600); }, 850);
+    setError(null);
+    const payload: Partial<AccessibilityProfileData> = {
+      wheelchair_required: Boolean(selected.wheelchair?.length && !selected.wheelchair.includes("Not applicable")),
+      step_free_required: Boolean(selected.stepfree?.includes("Step-free required") || selected.stepfree?.includes("Step-free preferred")),
+      accessible_vehicle_required: Boolean(selected.transport?.includes("Accessible transport required")),
+      elevator_preferred: Boolean(selected.elevator?.includes("Elevator required") || selected.elevator?.includes("Elevator preferred")),
+      accessible_toilet_preferred: Boolean(selected.bathroom?.includes("Accessible bathroom required")),
+      reduced_walking: Boolean(selected.mobility?.includes("Minimal walking") || selected.mobility?.includes("Frequent rest stops")),
+      accessible_venue_required: Boolean(selected.cognitive?.length && !selected.cognitive.includes("No preference")),
+    };
+
+    try {
+      const res = await updateAccessibilityProfile(payload);
+      if (res?.success) {
+        setSaved(true);
+        window.setTimeout(() => setSaved(false), 3000);
+      } else {
+        throw new Error("Failed to save accessibility preferences.");
+      }
+    } catch (err: any) {
+      console.warn("Error updating accessibility profile:", err);
+      setError("Could not save preferences to server. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (

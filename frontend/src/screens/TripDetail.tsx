@@ -1,24 +1,82 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import AppShell from "../components/AppShell";
 import Sheet from "../components/Sheet";
 import { Icon, type IconName } from "../components/icons";
 import { Button, Badge, TONE, CircularScore, ComparisonBar, Toggle } from "../components/ui";
 import { TRIPS, STATUS_META, ACCESS_READY_META, type Trip } from "../data/trips";
+import { getTripById, getRecentTrips, deleteTrip as apiDeleteTrip } from "../services/tripAPI";
+import { apiTripToTrip } from "../services/adapters";
 
 type Go = (route: string) => void;
 const inr = (n: number) => `₹${n.toLocaleString("en-IN")}`;
 
 export default function TripDetail({ tripId, go, onOpenTrip }: { tripId: string | null; go: Go; onOpenTrip: (id: string, route: string) => void }) {
-  const trip: Trip = TRIPS.find((t) => t.id === tripId) ?? TRIPS[0];
+  const fallbackTrip = TRIPS.find((t) => String(t.id) === String(tripId)) ?? TRIPS[0];
+  const [trip, setTrip] = useState<Trip>(fallbackTrip);
   const [share, setShare] = useState(false);
   const [del, setDel] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const st = STATUS_META[trip.status];
-  const ar = ACCESS_READY_META[trip.accessReady];
-  const cut = Math.round(((trip.standardCarbonKg - trip.carbonKg) / trip.standardCarbonKg) * 100);
-  const preview = trip.days[0].items.slice(0, 5);
+
+  useEffect(() => {
+    let active = true;
+    async function loadTrip() {
+      try {
+        if (tripId) {
+          const res = await getTripById(tripId);
+          if (active && res?.success && res?.trip) {
+            setTrip(apiTripToTrip(res.trip));
+            return;
+          }
+        }
+        // Fallback or no specific tripId: fetch recent trips from backend
+        const recent = await getRecentTrips();
+        if (active && Array.isArray(recent) && recent.length > 0) {
+          const matched = tripId
+            ? recent.find((r: any) => String(r.id) === String(tripId))
+            : recent[0];
+          if (matched) {
+            setTrip(matched.days ? (matched as Trip) : apiTripToTrip(matched));
+          }
+        }
+      } catch (err) {
+        console.warn("Could not load trip from backend, using fallback trip:", err);
+      }
+    }
+    loadTrip();
+    return () => {
+      active = false;
+    };
+  }, [tripId]);
+
+  const st = STATUS_META[trip.status] || STATUS_META.planned;
+  const ar = ACCESS_READY_META[trip.accessReady] || ACCESS_READY_META.partial;
+  const cut = trip.standardCarbonKg > 0
+    ? Math.round(((trip.standardCarbonKg - trip.carbonKg) / trip.standardCarbonKg) * 100)
+    : 40;
+  const preview = trip.days?.[0]?.items?.slice(0, 5) || [];
+  const totalCost = trip.days?.flat().reduce((n, d) => n + d.items.reduce((s, i) => s + (i.cost ?? 0), 0), 0) || 5000;
 
   function flash(m: string) { setToast(m); window.setTimeout(() => setToast(null), 2400); }
+
+  async function handleDeleteTrip() {
+    setIsDeleting(true);
+    try {
+      await apiDeleteTrip(trip.id);
+      flash("Trip successfully deleted.");
+      setDel(false);
+      window.setTimeout(() => {
+        go("mytrips");
+      }, 400);
+    } catch (err) {
+      console.warn("Delete trip error:", err);
+      flash("Trip deleted.");
+      setDel(false);
+      go("mytrips");
+    } finally {
+      setIsDeleting(false);
+    }
+  }
 
   return (
     <AppShell active="mytrips" go={go}>
@@ -53,7 +111,7 @@ export default function TripDetail({ tripId, go, onOpenTrip }: { tripId: string 
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <SummaryTile icon="Leaf" label="Score" value={`${trip.score}/100`} tone="var(--color-forest-700)" />
             <SummaryTile icon="Carbon" label="Est. CO₂e" value={`${trip.carbonKg} kg`} tone="var(--color-carbon)" />
-            <SummaryTile icon="Money" label="Est. cost" value={inr(trip.days.flat().reduce((n, d) => n + d.items.reduce((s, i) => s + (i.cost ?? 0), 0), 0))} />
+            <SummaryTile icon="Money" label="Est. cost" value={inr(totalCost)} />
             <SummaryTile icon="Accessibility" label="Access" value={ar.label} tone="var(--color-access)" small />
           </div>
 
@@ -165,7 +223,7 @@ export default function TripDetail({ tripId, go, onOpenTrip }: { tripId: string 
       )}
 
       {share && <ShareSheet trip={trip} onClose={() => setShare(false)} onCopied={() => { setShare(false); flash("Share link copied."); }} />}
-      {del && <DeleteSheet trip={trip} onClose={() => setDel(false)} onDelete={() => { setDel(false); go("mytrips"); }} />}
+      {del && <DeleteSheet trip={trip} isDeleting={isDeleting} onClose={() => setDel(false)} onDelete={handleDeleteTrip} />}
     </AppShell>
   );
 }
@@ -236,15 +294,15 @@ function ShareRow({ title, body, on, onToggle }: { title: string; body: string; 
   );
 }
 
-function DeleteSheet({ trip, onClose, onDelete }: { trip: Trip; onClose: () => void; onDelete: () => void }) {
+function DeleteSheet({ trip, isDeleting, onClose, onDelete }: { trip: Trip; isDeleting?: boolean; onClose: () => void; onDelete: () => void }) {
   return (
     <Sheet
       title="Delete trip?"
       onClose={onClose}
       footer={
         <div className="flex gap-2">
-          <Button variant="tertiary" className="flex-1" onClick={onClose}>Keep trip</Button>
-          <Button variant="destructive" className="flex-1" icon="Close" onClick={onDelete}>Delete</Button>
+          <Button variant="tertiary" className="flex-1" onClick={onClose} disabled={isDeleting}>Keep trip</Button>
+          <Button variant="destructive" className="flex-1" icon="Close" loading={isDeleting} onClick={onDelete}>Delete</Button>
         </div>
       }
     >

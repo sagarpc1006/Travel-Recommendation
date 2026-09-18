@@ -12,6 +12,8 @@ import {
   type ItineraryItem,
   type ItineraryDay,
 } from "../data/trips";
+import { getTripById, getRecentTrips } from "../services/tripAPI";
+import { apiTripToTrip } from "../services/adapters";
 
 type Go = (route: string) => void;
 const inr = (n: number) => `₹${n.toLocaleString("en-IN")}`;
@@ -54,11 +56,12 @@ function useConnectivity() {
 }
 
 export default function Itinerary({ tripId, go }: { tripId: string | null; go: Go }) {
-  const trip: Trip = TRIPS.find((t) => t.id === tripId) ?? TRIPS[0];
+  const fallbackTrip = TRIPS.find((t) => String(t.id) === String(tripId)) ?? TRIPS[0];
+  const [trip, setTrip] = useState<Trip>(fallbackTrip);
   const reduced = useReducedMotion();
   const { banner, dismiss } = useConnectivity();
 
-  const [days, setDays] = useState<ItineraryDay[]>(trip.days);
+  const [days, setDays] = useState<ItineraryDay[]>(fallbackTrip.days);
   const [dayIdx, setDayIdx] = useState(0);
   const [selectedItem, setSelectedItem] = useState<string | null>(null);
   const [editMode, setEditMode] = useState(false);
@@ -66,6 +69,40 @@ export default function Itinerary({ tripId, go }: { tripId: string | null; go: G
   const [toast, setToast] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [pendingRoute, setPendingRoute] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    async function loadItinerary() {
+      try {
+        if (tripId) {
+          const res = await getTripById(tripId);
+          if (active && res?.success && res?.trip) {
+            const adapted = apiTripToTrip(res.trip);
+            setTrip(adapted);
+            setDays(adapted.days);
+            return;
+          }
+        }
+        const recent = await getRecentTrips();
+        if (active && Array.isArray(recent) && recent.length > 0) {
+          const matched = tripId
+            ? recent.find((r: any) => String(r.id) === String(tripId))
+            : recent[0];
+          if (matched) {
+            const adapted = matched.days ? (matched as Trip) : apiTripToTrip(matched);
+            setTrip(adapted);
+            setDays(adapted.days);
+          }
+        }
+      } catch (err) {
+        console.warn("Could not load trip itinerary from backend, using fallback:", err);
+      }
+    }
+    loadItinerary();
+    return () => {
+      active = false;
+    };
+  }, [tripId]);
 
   // Guard navigation when the itinerary has unsaved edits (§16).
   const guardedGo = (r: string) => (dirty ? setPendingRoute(r) : go(r));
@@ -75,9 +112,9 @@ export default function Itinerary({ tripId, go }: { tripId: string | null; go: G
   const [detailItem, setDetailItem] = useState<ItineraryItem | null>(null);
   const [mapMobile, setMapMobile] = useState(false);
 
-  const day = days[dayIdx];
-  const dayCarbon = useMemo(() => day.items.reduce((n, i) => n + (i.carbonKg ?? 0), 0), [day]);
-  const dayCost = useMemo(() => day.items.reduce((n, i) => n + (i.cost ?? 0), 0), [day]);
+  const day = days[dayIdx] || days[0] || fallbackTrip.days[0];
+  const dayCarbon = useMemo(() => (day ? day.items.reduce((n, i) => n + (i.carbonKg ?? 0), 0) : 0), [day]);
+  const dayCost = useMemo(() => (day ? day.items.reduce((n, i) => n + (i.cost ?? 0), 0) : 0), [day]);
 
   function flash(msg: string) {
     setToast(msg);
