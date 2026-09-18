@@ -216,16 +216,17 @@ export default function Planner({ go }: { go: Go }) {
     setSaveState("saving");
     const optionToSave = selected || recommended;
     const isVerifiedAcc = optionToSave.accessItems?.some((a) => a.status === "verified") ?? false;
+    const transportTitle = optionToSave.transport || optionToSave.label || "Eco Transit";
     const payload = {
-      title: `${tripReq.origin} to ${tripReq.destination}`,
+      title: `${tripReq.origin} to ${tripReq.destination} via ${transportTitle}`,
       origin: tripReq.origin,
       destination: tripReq.destination,
       duration_days: 3,
       travel_dates: tripReq.dates,
-      transport_mode: optionToSave.label || optionToSave.transport,
+      transport_mode: transportTitle,
       total_cost: optionToSave.cost,
       currency: "INR",
-      eco_score: recScore || 90,
+      eco_score: optionToSave.score || recScore || 90,
       carbon_emissions: optionToSave.carbonKg,
       carbon_saved: `${carbonCut}% vs standard`,
       accessibility_rating: optionToSave.access,
@@ -240,6 +241,14 @@ export default function Planner({ go }: { go: Go }) {
         sub: optionToSave.sub,
         why_recommended: optionToSave.reasons,
       },
+      eco_twin_data: ecoTwin ? {
+        id: ecoTwin.id,
+        transport: ecoTwin.transport,
+        carbonKg: ecoTwin.carbonKg,
+        cost: ecoTwin.cost,
+        score: ecoTwin.score,
+        carbonCut: `${carbonCut}%`,
+      } : {},
       show_your_math_data: optionToSave.rawShowYourMath || null,
     };
 

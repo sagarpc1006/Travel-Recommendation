@@ -122,7 +122,7 @@ export default function Itinerary({ tripId, go }: { tripId: string | null; go: G
   }
   function save() {
     setSaveState("saving");
-    window.setTimeout(() => { setSaveState("saved"); setDirty(false); flash("Trip saved."); }, 850);
+    window.setTimeout(() => { setSaveState("saved"); setDirty(false); flash("Schedule updated for current session."); }, 600);
   }
 
   function mutateDay(fn: (items: ItineraryItem[]) => ItineraryItem[]) {

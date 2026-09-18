@@ -188,6 +188,7 @@ function AppRoutes() {
               </ProtectedRoute>
             }
           />
+          <Route path="/accessibility-verify" element={<Navigate to="/verify" replace />} />
 
           {/* Presentation & Prototype Showcase Routes */}
           <Route path="/presentation" element={<Presentation go={go} />} />
